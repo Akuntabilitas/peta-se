@@ -1,0 +1,190 @@
+/* ==========================================================================
+   1. MAP LAYOUT & CANVAS CONFIGURATION
+   ========================================================================== */
+#map {
+  height: calc(100vh - 64px);
+  width: 100%;
+  z-index: 1;
+}
+
+/* Kursor indikator saat proses memuat data spasial berlangsung */
+.map-loading {
+  cursor: wait !important;
+}
+
+.map-loading * {
+  cursor: wait !important;
+}
+
+/* ==========================================================================
+   2. DETEKSI ANOMALI KLASTER (ANIMASI & BADGES)
+   ========================================================================== */
+/* Lingkaran area klaster mengumpul (pulse merah samar) */
+@keyframes cluster-zone-pulse {
+  0%, 100% {
+    fill-opacity: 0.12;
+    stroke-opacity: 0.4;
+    stroke-width: 1.5px;
+  }
+  50% {
+    fill-opacity: 0.28;
+    stroke-opacity: 0.85;
+    stroke-width: 2.5px;
+  }
+}
+
+.cluster-zone-bg {
+  animation: cluster-zone-pulse 2s infinite ease-in-out;
+}
+
+/* Badge summary klaster anomali (saat Zoom Out) */
+.cluster-summary-badge {
+  position: relative;
+  background-color: #ef4444;
+  border: 1.5px solid #ffffff;
+  color: #ffffff;
+  font-weight: 800;
+  font-size: 10.5px;
+  padding: 3px 8px;
+  border-radius: 14px;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.4);
+  white-space: nowrap;
+  text-align: center;
+  cursor: pointer;
+  animation: badge-pulse 1.8s infinite ease-in-out;
+}
+
+/* Ekor/Panah penunjuk di bawah summary badge */
+.cluster-summary-badge::after {
+  content: '';
+  position: absolute;
+  bottom: -5px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 5px solid #ef4444;
+}
+
+@keyframes badge-pulse {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+  }
+  50% {
+    transform: scale(1.08);
+    box-shadow: 0 0 0 8px rgba(239, 68, 68, 0);
+  }
+}
+
+/* Header badge per klaster (saat Zoom In) */
+.cluster-zone-header-badge {
+  position: relative;
+  background-color: rgba(239, 68, 68, 0.95);
+  border: 1.5px solid #ffffff;
+  color: #ffffff;
+  font-weight: 800;
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 12px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  white-space: nowrap;
+  text-align: center;
+  pointer-events: none;
+}
+
+.cluster-zone-header-badge::after {
+  content: '';
+  position: absolute;
+  bottom: -4px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 4px solid rgba(239, 68, 68, 0.95);
+}
+
+/* ==========================================================================
+   3. NO. BANGUNAN LABELS & GARIS PANDU (LEADER LINES)
+   ========================================================================== */
+/* Styling tooltip melayang (Detail Label) */
+.no-bang-label {
+  background: rgba(15, 23, 42, 0.92) !important;
+  border: 1px solid #10b981 !important;
+  color: #34d399 !important;
+  font-size: 10px !important;
+  font-weight: 600 !important;
+  padding: 2.5px 6px !important;
+  border-radius: 5px !important;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5) !important;
+  white-space: nowrap !important;
+  pointer-events: none !important;
+
+  /* Transisi halus saat bergeser mekar dari titik */
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease-in-out !important;
+  will-change: transform, opacity;
+}
+
+/* Sembunyikan panah lancip bawaan Leaflet agar menyatu sempurna dengan leader line */
+.no-bang-label::before {
+  display: none !important;
+}
+
+/* Garis pandu (Leader Line) penyambung titik ke label */
+.leaflet-interactive.leader-line-style {
+  stroke: #10b981 !important;
+  stroke-width: 2px !important;
+  stroke-dasharray: 4, 3 !important;
+  stroke-linecap: round !important;
+  filter: drop-shadow(0px 1px 2px rgba(0, 0, 0, 0.8));
+}
+
+/* ==========================================================================
+   4. BADGE NOMOR BANGUNAN (MODE RINGKAS GANTI TITIK)
+   ========================================================================== */
+.custom-num-badge-container {
+  background: transparent !important;
+  border: none !important;
+}
+
+.num-badge-marker {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border-radius: 4px !important;
+  color: #ffffff !important;
+  font-weight: 800 !important;
+  font-size: 10px !important;
+  padding: 1px 4px !important;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.5) !important;
+  border: 1.2px solid rgba(255, 255, 255, 0.9) !important;
+  white-space: nowrap !important;
+  cursor: pointer !important;
+
+  /* Transisi saat di-hover atau digeser */
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s ease-in-out !important;
+  will-change: transform, opacity;
+}
+
+.num-badge-marker:hover {
+  transform: scale(1.2) !important;
+  z-index: 9999 !important;
+}
+
+/* ==========================================================================
+   5. LEAFLET POPUP OVERRIDES (PEMASANGAN TEMA GELAP)
+   ========================================================================== */
+.leaflet-popup-content-wrapper {
+  background: #ffffff !important;
+  border-radius: 12px !important;
+  padding: 2px !important;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4) !important;
+}
+
+.leaflet-popup-tip {
+  background: #ffffff !important;
+}

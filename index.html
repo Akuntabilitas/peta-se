@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="id" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard Spatial Gap Analysis - Admin Kabupaten Boyolali</title>
+  
+  <!-- CSS LIBRARIES -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#ecfdf5',
+              500: '#10b981',
+              600: '#059669',
+              900: '#064e3b',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="css/style.css" />
+
+  <!-- JS LIBRARIES -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+
+  <style>
+    /* Custom Scrollbar Modern */
+    ::-webkit-scrollbar {
+      width: 5px;
+      height: 5px;
+    }
+    ::-webkit-scrollbar-track {
+      background: rgba(15, 23, 42, 0.6);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+    /* Cursor Loading */
+    .map-loading {
+      cursor: wait !important;
+    }
+    .status-loading {
+      animation: pulse-status 1.5s infinite ease-in-out;
+    }
+    @keyframes pulse-status {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans antialiased overflow-hidden h-screen flex flex-col">
+
+  <!-- TOPBAR HEADER -->
+  <header class="h-16 bg-slate-900/90 backdrop-blur-md border-b border-slate-800 flex items-center justify-between px-5 shrink-0 z-20">
+    <div class="flex items-center space-x-3">
+      <div class="relative flex h-3 w-3">
+        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+        <span class="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
+      </div>
+      <div>
+        <h1 class="text-sm font-bold tracking-wide text-slate-100 flex items-center gap-2">
+          <span>SPATIAL GAP MONITORING</span>
+          <span class="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded border border-slate-700 font-normal">BOYOLALI</span>
+        </h1>
+        <p class="text-[10px] text-slate-400">Monitoring Pemetaan & Presisi Tagging Bangunan</p>
+      </div>
+    </div>
+    
+    <!-- METRIC CARDS TOPBAR -->
+    <div class="flex space-x-3 text-xs">
+      <div class="bg-slate-800/80 border border-slate-700/60 px-3 py-1 rounded-lg flex items-center gap-2">
+        <span class="text-slate-400 text-[11px]">Google Buildings:</span>
+        <span id="metric-google-drawn" class="font-extrabold text-amber-400 font-mono">0</span>
+      </div>
+      <div class="bg-slate-800/80 border border-slate-700/60 px-3 py-1 rounded-lg flex items-center gap-2">
+        <span class="text-slate-400 text-[11px]">Tagging DB:</span>
+        <span id="metric-db-tagging" class="font-extrabold text-emerald-400 font-mono">0</span>
+      </div>
+      <div class="bg-slate-800/80 border border-slate-700/60 px-3 py-1 rounded-lg flex items-center gap-2">
+        <span class="text-slate-400 text-[11px]">Anomali Mengumpul:</span>
+        <span id="metric-anomali" class="font-extrabold text-purple-400 font-mono">0</span>
+      </div>
+      <div class="bg-slate-800/80 border border-slate-700/60 px-3 py-1 rounded-lg flex items-center gap-2">
+        <span class="text-slate-400 text-[11px]">Total Selisih Gap:</span>
+        <span id="metric-gap" class="font-extrabold text-red-400 font-mono">0</span>
+      </div>
+      <div class="bg-red-950/50 border border-red-800/60 px-3 py-1 rounded-lg flex items-center gap-2">
+        <span class="text-red-300 text-[11px] font-semibold">SLS Kritis:</span>
+        <span id="metric-kritis" class="font-black bg-red-600 px-2 py-0.5 rounded text-white font-mono text-[11px]">0</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="flex flex-1 overflow-hidden relative">
+    <!-- SIDEBAR KIRI -->
+    <aside class="w-80 bg-slate-900/95 border-r border-slate-800 p-3.5 flex flex-col h-full z-10 overflow-y-auto space-y-3 shrink-0">
+      
+      <!-- TOGGLE CONTROL LAYER PEMBANDING -->
+      <div class="bg-slate-800/60 p-3 rounded-xl border border-slate-700/60 space-y-2.5 shadow-sm">
+        <h2 class="text-[11px] font-bold uppercase text-slate-400 tracking-wider flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"></path></svg>
+          Layer Pembanding Spasial
+        </h2>
+        
+        <div class="flex items-center justify-between p-1.5 hover:bg-slate-700/40 rounded-lg transition cursor-pointer">
+          <label for="toggle-google-buildings" class="text-xs text-amber-300 font-medium cursor-pointer flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block"></span>
+            <span>Titik Google Buildings</span>
+          </label>
+          <input type="checkbox" id="toggle-google-buildings" class="w-4 h-4 text-amber-500 rounded focus:ring-amber-400 accent-amber-500 cursor-pointer">
+        </div>
+
+        <div class="flex items-center justify-between p-1.5 hover:bg-slate-700/40 rounded-lg transition cursor-pointer">
+          <label for="toggle-tagging-db" class="text-xs text-emerald-300 font-medium cursor-pointer flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-emerald-400 inline-block"></span>
+            <span>Titik Tagging Field (DB)</span>
+          </label>
+          <input type="checkbox" id="toggle-tagging-db" checked class="w-4 h-4 text-emerald-500 rounded focus:ring-emerald-400 accent-emerald-500 cursor-pointer">
+        </div>
+
+        <div class="flex items-center justify-between p-1.5 hover:bg-slate-700/40 rounded-lg transition cursor-pointer border-t border-slate-700/50 pt-2">
+          <label for="toggle-anomali-cluster" class="text-xs text-purple-300 font-medium cursor-pointer flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-purple-400 inline-block animate-pulse"></span>
+            <span>Indikasi Tagging Mengumpul</span>
+          </label>
+          <input type="checkbox" id="toggle-anomali-cluster" checked class="w-4 h-4 text-purple-500 rounded focus:ring-purple-400 accent-purple-500 cursor-pointer">
+        </div>
+      </div>
+
+      <!-- FILTER MULTI-SELECT JENIS BANGUNAN -->
+      <div class="bg-purple-950/20 p-3 rounded-xl border border-purple-900/50 space-y-2">
+        <div class="flex items-center justify-between">
+          <h2 class="text-[11px] font-bold uppercase text-purple-300 tracking-wider">Filter Jenis Bangunan</h2>
+          <div class="space-x-1.5 text-[10px]">
+            <button id="btn-jenis-all" type="button" class="text-purple-400 hover:text-purple-300 font-semibold hover:underline">Semua</button>
+            <span class="text-slate-600">|</span>
+            <button id="btn-jenis-reset" type="button" class="text-slate-400 hover:text-slate-300 hover:underline">Reset</button>
+          </div>
+        </div>
+
+        <div class="relative">
+          <button id="btn-dropdown-jenis" type="button" class="w-full bg-slate-800 hover:bg-slate-700/80 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 text-left flex justify-between items-center focus:outline-none focus:border-purple-500 transition">
+            <span id="label-selected-jenis" class="truncate">Semua Jenis Bangunan (1-9)</span>
+            <span class="text-[10px] text-slate-400 ml-1">▼</span>
+          </button>
+
+          <div id="dropdown-jenis-menu" class="hidden absolute top-full left-0 right-0 mt-1 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl p-2 z-50 space-y-1 max-h-56 overflow-y-auto backdrop-blur-lg">
+            <label class="flex items-center gap-2 text-[11px] text-slate-200 cursor-pointer hover:bg-slate-700/60 p-1.5 rounded-lg transition">
+              <input type="checkbox" value="1" class="chk-jenis w-3.5 h-3.5 text-blue-600 rounded accent-blue-600" checked>
+              <span>1. Khusus Usaha 💼</span>
+            </label>
+            <label class="flex items-center gap-2 text-[11px] text-slate-200 cursor-pointer hover:bg-slate-700/60 p-1.5 rounded-lg transition">
+              <input type="checkbox" value="2" class="chk-jenis w-3.5 h-3.5 text-purple-600 rounded accent-purple-600" checked>
+              <span>2. Campuran (Tinggal + Usaha) 🏪</span>
+            </label>
+            <label class="flex items-center gap-2 text-[11px] text-slate-200 cursor-pointer hover:bg-slate-700/60 p-1.5 rounded-lg transition">
+              <input type="checkbox" value="3" class="chk-jenis w-3.5 h-3.5 text-emerald-600 rounded accent-emerald-600" checked>
+              <span>3. Tempat Tinggal 🏠</span>
+            </label>
+            <label class="flex items-center gap-2 text-[11px] text-slate-200 cursor-pointer hover:bg-slate-700/60 p-1.5 rounded-lg transition">
+              <input type="checkbox" value="4" class="chk-jenis w-3.5 h-3.5 text-amber-600 rounded accent-amber-600" checked>
+              <span>4. Ibadah / Kantor Organisasi 🕌</span>
+            </label>
+            <label class="flex items-center gap-2 text-[11px] text-slate-200 cursor-pointer hover:bg-slate-700/60 p-1.5 rounded-lg transition">
+              <input type="checkbox" value="5" class="chk-jenis w-3.5 h-3.5 text-red-600 rounded accent-red-600" checked>
+              <span>5. Kantor Pemerintah 🏛️</span>
+            </label>
+            <label class="flex items-center gap-2 text-[11px] text-slate-200 cursor-pointer hover:bg-slate-700/60 p-1.5 rounded-lg transition">
+              <input type="checkbox" value="6" class="chk-jenis w-3.5 h-3.5 text-slate-500 rounded accent-slate-500" checked>
+              <span>6. Lainnya / Kosong / Rusak 🏚️</span>
+            </label>
+            <label class="flex items-center gap-2 text-[11px] text-slate-200 cursor-pointer hover:bg-slate-700/60 p-1.5 rounded-lg transition">
+              <input type="checkbox" value="7" class="chk-jenis w-3.5 h-3.5 text-cyan-600 rounded accent-cyan-600" checked>
+              <span>7. Virtual Office (VO) 💻</span>
+            </label>
+            <label class="flex items-center gap-2 text-[11px] text-slate-200 cursor-pointer hover:bg-slate-700/60 p-1.5 rounded-lg transition">
+              <input type="checkbox" value="8" class="chk-jenis w-3.5 h-3.5 text-amber-900 rounded accent-amber-800" checked>
+              <span>8. Panti / Lapas / Barak 🏢</span>
+            </label>
+            <label class="flex items-center gap-2 text-[11px] text-slate-200 cursor-pointer hover:bg-slate-700/60 p-1.5 rounded-lg transition">
+              <input type="checkbox" value="9" class="chk-jenis w-3.5 h-3.5 text-slate-600 rounded accent-slate-600" checked>
+              <span>9. Non Respon ❓</span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- UPLOAD CSV TAGGING -->
+      <div class="bg-slate-800/60 p-3 rounded-xl border border-slate-700/60 space-y-1.5">
+        <h2 class="text-[11px] font-bold uppercase text-emerald-400 tracking-wider">📁 Import CSV Tagging</h2>
+        <input type="file" id="csv-file-input" accept=".csv" class="block w-full text-[11px] text-slate-400 file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[10px] file:font-bold file:bg-emerald-600 file:text-white hover:file:bg-emerald-500 cursor-pointer transition" />
+        <div id="upload-status" class="text-[10px] text-slate-400 font-mono min-h-[14px]"></div>
+      </div>
+
+      <!-- FILTER PETUGAS LAPANGAN -->
+      <div class="bg-blue-950/20 p-3 rounded-xl border border-blue-900/40 space-y-2">
+        <h2 class="text-[11px] font-bold uppercase text-blue-400 tracking-wider">Filter Petugas Lapangan</h2>
+        
+        <div>
+          <label class="block text-[10px] font-medium text-slate-400 mb-1">PML (Pengawas)</label>
+          <select id="filter-pml" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500 transition">
+            <option value="">-- Semua PML --</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-[10px] font-medium text-slate-400 mb-1">PCL / PPL (Pencacah)</label>
+          <select id="filter-pcl" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500 transition">
+            <option value="">-- Semua PCL / PPL --</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- FILTER WILAYAH -->
+      <div class="space-y-2">
+        <h2 class="text-[11px] font-bold uppercase text-slate-400 tracking-wider">Wilayah Administratif</h2>
+        
+        <div>
+          <label class="block text-[10px] text-slate-400 mb-1">Kecamatan</label>
+          <select id="filter-kec" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 transition">
+            <option value="">-- Semua Kecamatan --</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-[10px] text-slate-400 mb-1">Desa / Kelurahan</label>
+          <select id="filter-desa" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 transition">
+            <option value="">-- Semua Desa --</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-[10px] text-slate-400 mb-1">SLS / RT Spesifik</label>
+          <select id="filter-sls" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 transition">
+            <option value="">-- Semua SLS --</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-[10px] text-slate-400 mb-1">Status Klaster Gap</label>
+          <select id="filter-status" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 transition">
+            <option value="">-- Semua Status --</option>
+            <option value="KRITIS">🔴 KRITIS (Kosong Pemetaan)</option>
+            <option value="PERHATIAN">🟡 PERHATIAN (Gap Tinggi)</option>
+            <option value="AMAN">🔵 AMAN / SESUAI</option>
+          </select>
+        </div>
+      </div>
+
+      <hr class="border-slate-800">
+
+      <!-- DAFTAR SLS KRITIS -->
+      <div class="flex-1 flex flex-col min-h-[150px]">
+        <div class="flex justify-between items-center mb-2">
+          <h2 class="text-[11px] font-bold uppercase text-slate-400 tracking-wider">Daftar SLS Kritis</h2>
+          <span id="sls-count" class="text-[10px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded-full font-mono border border-slate-700">0 SLS</span>
+        </div>
+
+        <div id="sls-list" class="flex-1 space-y-2 overflow-y-auto pr-1">
+          <p class="text-xs text-slate-500 italic">Pilih wilayah atau petugas...</p>
+        </div>
+      </div>
+    </aside>
+
+    <!-- MAIN CANVAS PETA -->
+    <main class="flex-1 relative h-full">
+      <div id="map" class="w-full h-full"></div>
+
+      <!-- MAP LOADING SPINNER OVERLAY -->
+      <div id="map-loader" class="hidden absolute inset-0 bg-slate-950/50 backdrop-blur-[2px] z-[1000] flex items-center justify-center transition-opacity duration-300">
+        <div class="bg-slate-900/90 text-slate-100 px-5 py-3.5 rounded-2xl shadow-2xl border border-slate-800 flex items-center gap-3.5">
+          <svg class="animate-spin h-5 w-5 text-emerald-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <span id="map-loader-text" class="text-xs font-semibold tracking-wide">Memuat data spasial...</span>
+        </div>
+      </div>
+
+      <!-- LEGENDA JENIS BANGUNAN -->
+      <div class="absolute bottom-6 right-6 bg-slate-900/90 border border-slate-800 p-3 rounded-2xl shadow-2xl z-[1000] text-[11px] max-w-[240px] backdrop-blur-md">
+        <div class="font-bold text-slate-200 mb-2 border-b border-slate-800 pb-1.5 flex items-center justify-between">
+          <span>Legenda Jenis Bangunan</span>
+          <span class="text-[9px] bg-emerald-950 text-emerald-400 px-1.5 py-0.5 rounded-full border border-emerald-800/80 font-bold">Field DB</span>
+        </div>
+        <div class="space-y-1.5">
+          <div class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-[#2563EB] inline-block border border-blue-400/50"></span> <span>1. Khusus Usaha 💼</span></div>
+          <div class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-[#9333EA] inline-block border border-purple-400/50"></span> <span>2. Campuran 🏪</span></div>
+          <div class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-[#10B981] inline-block border border-emerald-400/50"></span> <span>3. Tempat Tinggal 🏠</span></div>
+          <div class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-[#D97706] inline-block border border-amber-400/50"></span> <span>4. Ibadah / Organisasi 🕌</span></div>
+          <div class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-[#DC2626] inline-block border border-red-400/50"></span> <span>5. Kantor Pemerintah 🏛️</span></div>
+          <div class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-[#6B7280] inline-block border border-gray-400/50"></span> <span>6. Lainnya / Kosong / Rusak 🏚️</span></div>
+          <div class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-[#0891B2] inline-block border border-cyan-400/50"></span> <span>7. Virtual Office 💻</span></div>
+          <div class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-[#78350F] inline-block border border-amber-900/50"></span> <span>8. Panti / Lapas / Barak 🏢</span></div>
+          <div class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-[#374151] inline-block border border-gray-500/50"></span> <span>9. Non Respon ❓</span></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- APPLICATION SCRIPTS -->
+  <script src="js/config.js"></script>
+  <script src="js/map.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
