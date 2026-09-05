@@ -113,20 +113,10 @@
    ========================================================================== */
 /* Styling tooltip melayang (Detail Label) */
 .no-bang-label {
-  background: rgba(15, 23, 42, 0.92) !important;
-  border: 1px solid #10b981 !important;
-  color: #34d399 !important;
-  font-size: 10px !important;
-  font-weight: 600 !important;
-  padding: 2.5px 6px !important;
-  border-radius: 5px !important;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5) !important;
-  white-space: nowrap !important;
-  pointer-events: none !important;
-
-  /* Transisi halus saat bergeser mekar dari titik */
-  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease-in-out !important;
-  will-change: transform, opacity;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
 }
 
 /* Sembunyikan panah lancip bawaan Leaflet agar menyatu sempurna dengan leader line */
