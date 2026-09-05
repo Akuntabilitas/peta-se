@@ -42,23 +42,49 @@ map.on('moveend zoomend', () => {
     const currentFilteredData = getFilteredData();
     renderDashboard(currentFilteredData);
 
-    if (document.getElementById('toggle-tagging-db').checked && cachedDbPoints.length > 0) {
+    const toggleDbEl = document.getElementById('toggle-tagging-db');
+    if (toggleDbEl && toggleDbEl.checked && cachedDbPoints.length > 0) {
       renderDbTaggingFromCache();
     }
 
-    if (document.getElementById('toggle-google-buildings').checked) {
+    const toggleGoogleEl = document.getElementById('toggle-google-buildings');
+    if (toggleGoogleEl && toggleGoogleEl.checked) {
       fetchAndRenderGoogleBuildings();
     }
-    if (document.getElementById('toggle-anomali-cluster').checked) {
+
+    const toggleAnomaliEl = document.getElementById('toggle-anomali-cluster');
+    if (toggleAnomaliEl && toggleAnomaliEl.checked) {
       fetchAndRenderAnomaliCluster();
     }
   }, 200);
 });
 
 // EVENT LISTENERS LAYER TOGGLES
-document.getElementById('toggle-tagging-db').addEventListener('change', () => fetchAndRenderDbTagging(false));
-document.getElementById('toggle-google-buildings').addEventListener('change', fetchAndRenderGoogleBuildings);
-document.getElementById('toggle-anomali-cluster').addEventListener('change', fetchAndRenderAnomaliCluster);
+const toggleDb = document.getElementById('toggle-tagging-db');
+if (toggleDb) {
+  toggleDb.addEventListener('change', () => fetchAndRenderDbTagging(false));
+}
+
+const toggleGoogle = document.getElementById('toggle-google-buildings');
+if (toggleGoogle) {
+  toggleGoogle.addEventListener('change', fetchAndRenderGoogleBuildings);
+}
+
+const toggleAnomali = document.getElementById('toggle-anomali-cluster');
+if (toggleAnomali) {
+  toggleAnomali.addEventListener('change', fetchAndRenderAnomaliCluster);
+}
+
+// TOGGLE BARU: TAMPILKAN / SEMBUNYIKAN LABEL DETAIL (RE-RENDER INSTAN DARI CACHE)
+const toggleLabels = document.getElementById('toggle-detailed-labels');
+if (toggleLabels) {
+  toggleLabels.addEventListener('change', () => {
+    const toggleDbEl = document.getElementById('toggle-tagging-db');
+    if (toggleDbEl && toggleDbEl.checked && cachedDbPoints.length > 0) {
+      renderDbTaggingFromCache();
+    }
+  });
+}
 
 // JALANKAN APLIKASI
 loadDashboardData();

@@ -148,7 +148,7 @@ export async function fetchAndRenderGoogleBuildings() {
   if (metricEl) metricEl.innerText = count.toLocaleString('id-ID');
 }
 
-// --- DB TAGGING ---
+// --- DB TAGGING (FETCH PER BATCH & OPTIMAL) ---
 export async function fetchAndRenderDbTagging(forceRefetch = false) {
   dbTaggingLayerGroup.clearLayers();
   const isChecked = document.getElementById('toggle-tagging-db').checked;
@@ -161,6 +161,7 @@ export async function fetchAndRenderDbTagging(forceRefetch = false) {
   const slsVal = document.getElementById('filter-sls').value;
   const selectedJenis = getSelectedJenisArray();
 
+  // 1. Cek validasi filter awal
   if ((!kecVal && !pmlVal && !pclVal) || !isChecked || selectedJenis.length === 0) {
     document.getElementById('upload-status').innerText = (!kecVal && !pmlVal && !pclVal) ? "💡 Titik disembunyikan di Level Kabupaten" : "";
     document.getElementById('metric-db-tagging').innerText = "0";
@@ -169,6 +170,7 @@ export async function fetchAndRenderDbTagging(forceRefetch = false) {
 
   const currentFilterKey = `${kecVal}_${desaVal}_${slsVal}_${pmlVal}_${pclVal}_${selectedJenis.join(',')}`;
 
+  // 2. Jika filter tidak berubah dan data cache sudah ada, render dari cache
   if (!forceRefetch && currentFilterKey === lastFetchFilterKey && cachedDbPoints.length > 0) {
     renderDbTaggingFromCache();
     return;
@@ -176,11 +178,11 @@ export async function fetchAndRenderDbTagging(forceRefetch = false) {
 
   const statusEl = document.getElementById('upload-status');
   if (statusEl) {
-    statusEl.innerText = "⏳ Memuat titik tagging...";
+    statusEl.innerText = "⏳ Mempersiapkan pengunduhan data tagging...";
     statusEl.classList.add('status-loading');
   }
 
-  showMapLoader("Memuat titik bangunan...");
+  showMapLoader("Mempersiapkan data tagging...");
 
   const activeSlsCodes = filtered.map(d => d.kd_sls);
   if (activeSlsCodes.length === 0) {
@@ -189,22 +191,67 @@ export async function fetchAndRenderDbTagging(forceRefetch = false) {
     return;
   }
 
-// --- UBAH BAGIAN INI DI fetchAndRenderDbTagging ---
-const { data: points, error } = await supabaseClient
-  .from('view_tagged_buildings_analysis') // <- Ganti nama table ke View baru
-  .select('id, no_bang, nama_bang, jenis_bangunan, kd_sls, geom, is_cluster, is_outside_boundary')
-  .in('kd_sls', activeSlsCodes)
-  .in('jenis_bangunan', selectedJenis);
+  // =========================================================================
+  // PEMROSESAN PER BATCH (CHUNK) UNTUK MENCEGAH TIMEOUT / REST API OVERFLOW
+  // =========================================================================
+  const CHUNK_SIZE = 150; // Jumlah maksimal kode SLS yang dikirim per request
+  const allPoints = [];
+  const totalSls = activeSlsCodes.length;
+  const totalBatches = Math.ceil(totalSls / CHUNK_SIZE);
 
-  hideMapLoader();
-  if (statusEl) statusEl.classList.remove('status-loading');
+  try {
+    for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+      const start = batchIndex * CHUNK_SIZE;
+      const end = start + CHUNK_SIZE;
+      const chunkSls = activeSlsCodes.slice(start, end);
 
-  if (error) return;
+      const percentProgress = Math.round(((batchIndex + 1) / totalBatches) * 100);
 
-  setCachedDbPoints(points || []);
-  setLastFetchFilterKey(currentFilterKey);
+      // Keterangan indikator real-time pada teks status dan loader
+      const infoText = `Memuat Batch ${batchIndex + 1}/${totalBatches} (${chunkSls.length} SLS)... [${percentProgress}%]`;
+      
+      if (statusEl) {
+        statusEl.innerText = `⏳ ${infoText}`;
+      }
+      showMapLoader(`Memuat titik tagging... ${percentProgress}%`);
 
-  renderDbTaggingFromCache();
+      // Eksekusi request ke Supabase per batch
+      const { data: pointsChunk, error } = await supabaseClient
+        .from('view_tagged_buildings_analysis')
+        .select('id, no_bang, nama_bang, jenis_bangunan, kd_sls, geom, is_cluster, is_outside_boundary')
+        .in('kd_sls', chunkSls)
+        .in('jenis_bangunan', selectedJenis);
+
+      if (error) {
+        console.error(`Gagal memuat batch ke-${batchIndex + 1}:`, error);
+        throw error;
+      }
+
+      if (pointsChunk && pointsChunk.length > 0) {
+        allPoints.push(...pointsChunk);
+      }
+    }
+
+    // 3. Simpan seluruh hasil penggabungan batch ke cache lokal
+    setCachedDbPoints(allPoints);
+    setLastFetchFilterKey(currentFilterKey);
+
+    // 4. Render ke peta dari cache
+    renderDbTaggingFromCache();
+
+    if (statusEl) {
+      statusEl.innerText = `✅ Berhasil memuat ${allPoints.length.toLocaleString('id-ID')} titik tagging (${totalSls} SLS)`;
+    }
+
+  } catch (err) {
+    console.error("Terjadi kesalahan saat memuat data tagging:", err);
+    if (statusEl) {
+      statusEl.innerText = "⚠️ Gagal mengambil beberapa/seluruh data tagging dari server";
+    }
+  } finally {
+    hideMapLoader();
+    if (statusEl) statusEl.classList.remove('status-loading');
+  }
 }
 
 export function renderDbTaggingFromCache() {
@@ -215,8 +262,14 @@ export function renderDbTaggingFromCache() {
   const slsVal = document.getElementById('filter-sls').value;
   const pclVal = document.getElementById('filter-pcl').value;
 
+  // Baca Toggle Sidebar untuk visibilitas label detail
+  const toggleLabelsEl = document.getElementById('toggle-detailed-labels');
+  const isLabelToggleActive = toggleLabelsEl ? toggleLabelsEl.checked : true;
+
   const currentZoom = map.getZoom();
-  const isShowDetailedLabel = currentZoom >= 20;
+  // Label hanya dirender jika Zoom >= 19 DAN Switch Toggle Sidebar Aktif
+  const isShowDetailedLabel = currentZoom >= 19 && isLabelToggleActive;
+
   const isFilterActive = (desaVal || slsVal || pclVal) ? true : false;
   const isBadgeMode = isFilterActive && !isShowDetailedLabel;
 
@@ -228,14 +281,10 @@ export function renderDbTaggingFromCache() {
   const occupiedBoxes = [];
 
   const placementCandidates = [
-    { x: 15, y: 0, dir: 'right' }, { x: -15, y: 0, dir: 'left' }, { x: 0, y: -18, dir: 'top' }, { x: 0, y: 18, dir: 'bottom' },
-    { x: 18, y: -18, dir: 'right' }, { x: -18, y: -18, dir: 'left' }, { x: 18, y: 18, dir: 'right' }, { x: -18, y: 18, dir: 'left' },
-    { x: 35, y: 0, dir: 'right' }, { x: -35, y: 0, dir: 'left' }, { x: 0, y: -35, dir: 'top' }, { x: 0, y: 35, dir: 'bottom' },
-    { x: 32, y: -32, dir: 'right' }, { x: -32, y: -32, dir: 'left' }, { x: 32, y: 32, dir: 'right' }, { x: -32, y: 32, dir: 'left' },
-    { x: 52, y: 0, dir: 'right' }, { x: -52, y: 0, dir: 'left' }, { x: 0, y: -52, dir: 'top' }, { x: 0, y: 52, dir: 'bottom' },
-    { x: 48, y: -48, dir: 'right' }, { x: -48, y: -48, dir: 'left' }, { x: 48, y: 48, dir: 'right' }, { x: -48, y: 48, dir: 'left' },
-    { x: 70, y: 0, dir: 'right' }, { x: -70, y: 0, dir: 'left' }, { x: 0, y: -70, dir: 'top' }, { x: 0, y: 70, dir: 'bottom' },
-    { x: 65, y: -65, dir: 'right' }, { x: -65, y: -65, dir: 'left' }, { x: 65, y: 65, dir: 'right' }, { x: -65, y: 65, dir: 'left' }
+    { x: 12, y: 0, dir: 'right' }, { x: -12, y: 0, dir: 'left' }, { x: 0, y: -16, dir: 'top' }, { x: 0, y: 16, dir: 'bottom' },
+    { x: 14, y: -16, dir: 'right' }, { x: -14, y: -16, dir: 'left' }, { x: 14, y: 16, dir: 'right' }, { x: -14, y: 16, dir: 'left' },
+    { x: 28, y: 0, dir: 'right' }, { x: -28, y: 0, dir: 'left' }, { x: 0, y: -28, dir: 'top' }, { x: 0, y: 28, dir: 'bottom' },
+    { x: 25, y: -25, dir: 'right' }, { x: -25, y: -25, dir: 'left' }, { x: 25, y: 25, dir: 'right' }, { x: -25, y: 25, dir: 'left' }
   ];
 
   function isOverlapping(boxA, boxB) {
@@ -296,18 +345,17 @@ export function renderDbTaggingFromCache() {
         const noText = pt.no_bang ? `${pt.no_bang}` : '?';
         let bgColor = style.fillColor || style.color || '#10b981';
 
-        // Penyesuaian warna mode badge sederhana
         if (pt.is_cluster && pt.is_outside_boundary) {
           bgColor = '#DC2626'; // Merah
         } else if (pt.is_cluster || pt.is_outside_boundary) {
-          bgColor = '#D97706'; // Kuning / Amber
+          bgColor = '#D97706'; // Kuning
         }
 
         const badgeIcon = L.divIcon({
           className: 'custom-num-badge-container',
           html: `<div class="num-badge-marker" style="background-color: ${bgColor};">${noText}</div>`,
-          iconSize: [28, 18],
-          iconAnchor: [14, 9]
+          iconSize: [24, 16],
+          iconAnchor: [12, 8]
         });
 
         const badgeMarker = L.marker([lat, lng], { icon: badgeIcon });
@@ -315,7 +363,6 @@ export function renderDbTaggingFromCache() {
         dbTaggingLayerGroup.addLayer(badgeMarker);
 
       } else {
-        // Tentukan warna marker lingkaran
         let circleColor = style.color;
         let circleFill = style.fillColor;
 
@@ -329,10 +376,10 @@ export function renderDbTaggingFromCache() {
 
         const circle = L.circleMarker([lat, lng], {
           interactive: true,
-          radius: 6,
+          radius: 5,
           fillColor: circleFill,
           color: circleColor,
-          weight: 1.5,
+          weight: 1.2,
           fillOpacity: 0.95
         });
 
@@ -341,46 +388,43 @@ export function renderDbTaggingFromCache() {
         if (isShowDetailedLabel && renderedLabelsCount < MAX_PERMANENT_LABELS) {
           const noText = pt.no_bang ? `#${pt.no_bang}` : '';
           const nameText = pt.nama_bang ? `${pt.nama_bang}` : 'Tanpa Nama';
-          const slsNameText = slsInfo.nama_sls || '-';
+          const slsNameText = slsInfo.nama_sls || 'SLS ?';
 
-          // ==============================================================
-          // PENYESUAIAN WARNA BACKGROUND, BORDER, DAN TEKS LABEL
-          // ==============================================================
-          let boxStyleClass = "bg-white/95 border-emerald-500 text-slate-800 shadow-md";
-          let noTextClass = "text-emerald-700 font-extrabold";
-          let subTextClass = "text-gray-500 border-gray-200";
-          let badgeStatusHtml = "";
+          // Styling Minimalis + Ringkas Dua Baris
+          let boxStyleClass = "bg-white/95 border-slate-300 text-slate-800 shadow-sm";
+          let noTextClass = "text-emerald-700 font-bold";
+          let subTextClass = "text-gray-500 border-gray-200/80";
+          let statusDot = "";
 
-          // 1. KLASTER & LUAR WILAYAH (MERAH MENOLOK)
+          // 1. KLASTER & LUAR WILAYAH (MERAH)
           if (pt.is_cluster && pt.is_outside_boundary) {
-            boxStyleClass = "bg-red-600 border-red-800 text-white shadow-xl ring-2 ring-red-400/50 animate-pulse";
-            noTextClass = "text-yellow-300 font-black";
+            boxStyleClass = "bg-red-600 border-red-700 text-white shadow font-semibold";
+            noTextClass = "text-yellow-300 font-extrabold";
             subTextClass = "text-red-100 border-red-500/80";
-            badgeStatusHtml = `<span class="bg-red-950 text-red-200 text-[7.5px] px-1 rounded ml-1 font-bold border border-red-400">⚠️ KLASTER & LUAR SLS</span>`;
+            statusDot = `<span class="inline-block w-1.5 h-1.5 bg-yellow-300 rounded-full ml-1 animate-ping"></span>`;
           } 
-          // 2. HANYA KLASTER ATAU HANYA LUAR WILAYAH (KUNING/AMBER)
+          // 2. HANYA KLASTER ATAU HANYA LUAR WILAYAH (KUNING)
           else if (pt.is_cluster || pt.is_outside_boundary) {
-            boxStyleClass = "bg-amber-400 border-amber-600 text-amber-950 shadow-lg ring-1 ring-amber-300";
-            noTextClass = "text-amber-900 font-black";
-            subTextClass = "text-amber-800 border-amber-500/60";
-            
-            if (pt.is_cluster) {
-              badgeStatusHtml = `<span class="bg-amber-100 text-amber-900 text-[7.5px] px-1 rounded ml-1 font-bold border border-amber-500">Klaster</span>`;
-            } else {
-              badgeStatusHtml = `<span class="bg-amber-100 text-amber-900 text-[7.5px] px-1 rounded ml-1 font-bold border border-amber-500">Luar Wilayah</span>`;
-            }
+            boxStyleClass = "bg-amber-400 border-amber-500 text-slate-900 shadow font-semibold";
+            noTextClass = "text-slate-950 font-extrabold";
+            subTextClass = "text-amber-900 border-amber-600/50";
+            statusDot = `<span class="inline-block w-1.5 h-1.5 bg-amber-900 rounded-full ml-1"></span>`;
           }
 
           const labelContent = `
-            <div class="px-2 py-1 rounded-md border-2 leading-tight text-center ${boxStyleClass}">
-              <div class="text-[11px] font-bold"><span class="${noTextClass}">${noText}</span> ${nameText} ${badgeStatusHtml}</div>
-              <div class="text-[8.5px] font-normal border-t mt-0.5 pt-0.5 truncate max-w-[150px] ${subTextClass}">${slsNameText}</div>
+            <div class="px-1.5 py-0.5 rounded border leading-tight text-center ${boxStyleClass}">
+              <div class="text-[10px] flex items-center justify-center gap-0.5 whitespace-nowrap">
+                <span class="${noTextClass}">${noText}</span>
+                <span class="truncate max-w-[110px]">${nameText}</span>
+                ${statusDot}
+              </div>
+              <div class="text-[8px] border-t mt-0.5 pt-0.5 truncate max-w-[120px] font-normal leading-none ${subTextClass}">${slsNameText}</div>
             </div>
           `;
 
           const pointContainer = map.latLngToContainerPoint([lat, lng]);
-          const approxWidth = Math.min(Math.max((nameText.length + noText.length) * 6, slsNameText.length * 4.5) + 12, 150);
-          const approxHeight = 24;
+          const approxWidth = Math.min(Math.max((nameText.length + noText.length) * 5, slsNameText.length * 4) + 10, 125);
+          const approxHeight = 22;
 
           let bestCandidate = null;
 
@@ -401,7 +445,7 @@ export function renderDbTaggingFromCache() {
           }
 
           if (!bestCandidate) {
-            const fallbackIdx = (renderedLabelsCount % 8) + 24;
+            const fallbackIdx = (renderedLabelsCount % 4) + 12;
             const cand = placementCandidates[fallbackIdx] || placementCandidates[placementCandidates.length - 1];
             const candBox = {
               left: pointContainer.x + cand.x,
