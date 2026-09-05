@@ -1,6 +1,7 @@
 import { 
   googleBuildingsCache, isDownloadingGoogle, setIsDownloadingGoogle,
   cachedDbPoints, setCachedDbPoints, lastFetchFilterKey, setLastFetchFilterKey,
+  cachedAnomaliPoints, setCachedAnomaliPoints, lastAnomaliFilterKey, setLastAnomaliFilterKey,
   slsLookupMap, uploadedTaggingMap 
 } from './state.js';
 
@@ -490,8 +491,8 @@ export function renderDbTaggingFromCache() {
   document.getElementById('metric-db-tagging').innerText = cachedDbPoints.length.toLocaleString('id-ID');
 }
 
-// --- ANOMALI CLUSTER ---
-export async function fetchAndRenderAnomaliCluster() {
+// --- ANOMALI CLUSTER (FETCH & CACHING OPTIMAL) ---
+export async function fetchAndRenderAnomaliCluster(forceRefetch = false) {
   anomaliClusterLayerGroup.clearLayers();
   const isChecked = document.getElementById('toggle-anomali-cluster').checked;
   
@@ -499,9 +500,21 @@ export async function fetchAndRenderAnomaliCluster() {
   const pmlVal = document.getElementById('filter-pml').value;
   const pclVal = document.getElementById('filter-pcl').value;
   const kecVal = document.getElementById('filter-kec').value;
+  const desaVal = document.getElementById('filter-desa').value;
+  const slsVal = document.getElementById('filter-sls').value;
 
   if ((!kecVal && !pmlVal && !pclVal) || !isChecked) {
     document.getElementById('metric-anomali').innerText = "0";
+    setCachedAnomaliPoints([]);
+    return;
+  }
+
+  // Kunci Filter Unik
+  const currentFilterKey = `anomali_${kecVal}_${desaVal}_${slsVal}_${pmlVal}_${pclVal}`;
+
+  // Jika filter tidak berubah dan data cache ada, gunakan cache (hemat egress)
+  if (!forceRefetch && currentFilterKey === lastAnomaliFilterKey && cachedAnomaliPoints.length > 0) {
+    renderAnomaliClusterFromCache();
     return;
   }
 
@@ -515,10 +528,26 @@ export async function fetchAndRenderAnomaliCluster() {
 
   if (error || !anomalies) return;
 
+  // Simpan ke Cache & Set Filter Key
+  setCachedAnomaliPoints(anomalies);
+  setLastAnomaliFilterKey(currentFilterKey);
+
+  renderAnomaliClusterFromCache();
+}
+
+// RENDER ANOMALI CLUSTER DARI CACHE LOKAL (DIPANGGIL SAAT MOVE / ZOOM PETA)
+export function renderAnomaliClusterFromCache() {
+  anomaliClusterLayerGroup.clearLayers();
+
+  if (!cachedAnomaliPoints || cachedAnomaliPoints.length === 0) {
+    document.getElementById('metric-anomali').innerText = "0";
+    return;
+  }
+
   const uniqueAnomalies = [];
   const seenKeys = new Set();
 
-  anomalies.forEach((item) => {
+  cachedAnomaliPoints.forEach((item) => {
     if (!item.geom || !item.geom.coordinates) return;
     const [lng, lat] = item.geom.coordinates;
     const uniqueKey = `${lat}_${lng}_${item.no_bang || ''}_${item.kd_sls}`;
@@ -718,60 +747,111 @@ export function renderDashboard(data) {
     const gap = targetMuatan - totalTagged;
     if (gap > 0) totalGap += gap;
 
-    let computedStatus = 'AMAN';
-    let color = "#3B82F6";
+// --- PENENTUAN WARNA BERTINGKAT BERDASARKAN GAP ---
+let computedStatus = 'AMAN';
+let color = "#3B82F6"; // Biru (Gap < 15)
 
-    if (totalTagged === 0 && targetMuatan > 10) {
-      computedStatus = 'KRITIS';
-      color = "#EF4444";
-      countKritis++;
-    } else if (gap >= 15) {
-      computedStatus = 'PERHATIAN';
-      color = "#F59E0B";
-    }
+// 1. KRITIS (Sangat Tinggi / Belum Ada Tagging Sama Sekali)
+if ((totalTagged === 0 && targetMuatan > 10) || gap >= 50) {
+  computedStatus = 'KRITIS';
+  color = "#EF4444"; // Merah
+  countKritis++;
+} 
+// 2. TINGGI (Gap 25 sampai 34)
+else if (gap >= 40) {
+  computedStatus = 'PERHATIAN (TINGGI)';
+  color = "#F97316"; // Oranye
+} 
+// 3. SEDANG / PERHATIAN (Gap 15 sampai 24)
+else if (gap >= 20) {
+  computedStatus = 'PERHATIAN';
+  color = "#F59E0B"; // Kuning / Amber
+}
+// Hitung realisasi tagging spesifik SLS dari cache (Gunakan String() untuk pencocokan kode SLS)
+const slsPoints = cachedDbPoints.filter(pt => String(pt.kd_sls).trim() === String(item.kd_sls).trim());
+
+// BTT: Jenis Bangunan 2 dan 3 (Konversi ke Number agar aman)
+const realisasiBtt = slsPoints.filter(pt => {
+  const j = Number(pt.jenis_bangunan);
+  return j === 2 || j === 3;
+}).length;
+
+// BKU: Jenis Bangunan 1
+const realisasiBku = slsPoints.filter(pt => Number(pt.jenis_bangunan) === 1).length;
+
+// BTTK + BBTT-NU: Selain Jenis Bangunan 1, 2, dan 3 (misal jenis 4, 5, null, atau tidak terdefinisi)
+const realisasiLainnya = slsPoints.filter(pt => {
+  const j = Number(pt.jenis_bangunan);
+  return ![1, 2, 3].includes(j);
+}).length;
+
+const targetBttkNu = bttk + bbttnu;
+
 
     if (item.geom) {
       const layer = L.geoJSON(item.geom, {
         style: { color: color, weight: 1.5, opacity: 0.9, fillOpacity: 0.3 }
       });
 
-      const popupHtml = `
-        <div class="text-gray-900 text-xs font-sans min-w-[220px] p-0.5">
-          <div class="font-bold text-sm text-slate-800 border-b pb-1 mb-1.5 flex justify-between items-center gap-1">
-            <span class="truncate">${item.nama_sls || item.nmsls}</span>
-            <span class="text-[10px] font-mono bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded border border-slate-300 shrink-0">${item.kd_sls}</span>
-          </div>
-          
-          <div class="space-y-0.5 text-[11px] mb-2 text-slate-600">
-            <div>👤 PCL / PPL: <b class="text-slate-800">${item.nama_pcl || 'Belum Ditunjuk'}</b></div>
-            <div>👔 PML: <b class="text-slate-800">${item.nama_pml || '-'}</b></div>
-          </div>
+const popupHtml = `
+  <div class="text-gray-900 text-xs font-sans min-w-[240px] p-0.5">
+    <div class="font-bold text-sm text-slate-800 border-b pb-1 mb-1.5 flex justify-between items-center gap-1">
+      <span class="truncate">${item.nama_sls || item.nmsls}</span>
+      <span class="text-[10px] font-mono bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded border border-slate-300 shrink-0">${item.kd_sls}</span>
+    </div>
+    
+    <div class="space-y-0.5 text-[11px] mb-2 text-slate-600">
+      <div>👤 PCL / PPL: <b class="text-slate-800">${item.nama_pcl || 'Belum Ditunjuk'}</b></div>
+      <div>👔 PML: <b class="text-slate-800">${item.nama_pml || '-'}</b></div>
+    </div>
 
-          <div class="bg-slate-50 p-2 rounded-lg border border-slate-200 mb-2">
-            <div class="font-bold text-slate-700 text-[10px] uppercase mb-1 border-b pb-0.5 border-slate-200 flex justify-between">
-              <span>Rincian Muatan Pemetaan</span>
-              <span class="text-emerald-700 font-bold">Total: ${targetMuatan.toLocaleString('id-ID')}</span>
-            </div>
-            <div class="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
-              <div class="flex justify-between"><span class="text-slate-500">BTT:</span> <b>${btt.toLocaleString('id-ID')}</b></div>
-              <div class="flex justify-between"><span class="text-slate-500">BKU:</span> <b>${bku.toLocaleString('id-ID')}</b></div>
-              <div class="flex justify-between"><span class="text-slate-500">BTTK:</span> <b>${bttk.toLocaleString('id-ID')}</b></div>
-              <div class="flex justify-between"><span class="text-slate-500">BBTT-NU:</span> <b>${bbttnu.toLocaleString('id-ID')}</b></div>
-            </div>
-          </div>
-
-          <div class="space-y-1 text-[11px] bg-emerald-50/70 p-2 rounded-lg border border-emerald-200">
-            <div class="flex justify-between items-center">
-              <span class="text-emerald-900 font-medium">📍 Realisasi Tagging:</span>
-              <b class="text-emerald-800 text-xs">${totalTagged.toLocaleString('id-ID')}</b>
-            </div>
-            <div class="flex justify-between items-center border-t border-emerald-200/80 pt-1">
-              <span class="font-bold ${gap > 0 ? 'text-red-700' : 'text-emerald-700'}">🔴 Selisih Gap:</span>
-              <b class="text-xs ${gap > 0 ? 'text-red-700 font-bold' : 'text-emerald-700'}">${gap.toLocaleString('id-ID')}</b>
-            </div>
-          </div>
+    <!-- BOX PEMBANDING RINCIAN MUATAN VS REALISASI -->
+    <div class="bg-slate-50 p-2 rounded-lg border border-slate-200 mb-2">
+      <div class="font-bold text-slate-700 text-[10px] uppercase mb-1.5 border-b pb-1 border-slate-200 flex justify-between items-center">
+        <span>Jenis Muatan</span>
+        <span class="text-slate-500 font-semibold">Tagging / Pemetaan</span>
+      </div>
+      
+      <div class="space-y-1 text-[11px]">
+        <!-- BKU VS JENIS 1 -->
+        <div class="flex justify-between items-center">
+          <span class="text-slate-600 font-medium">BKU <span class="text-[9px] text-slate-400">(Jenis 1)</span></span>
+          <span class="font-mono">
+            <b class="${realisasiBku < bku ? 'text-amber-600' : 'text-emerald-700'}">${realisasiBku.toLocaleString('id-ID')}</b> / <b>${bku.toLocaleString('id-ID')}</b>
+          </span>
         </div>
-      `;
+
+        <!-- BTT VS JENIS 2+3 -->
+        <div class="flex justify-between items-center border-t border-slate-100 pt-1">
+          <span class="text-slate-600 font-medium">BTT <span class="text-[9px] text-slate-400">(Jenis 2,3)</span></span>
+          <span class="font-mono">
+            <b class="${realisasiBtt < btt ? 'text-amber-600' : 'text-emerald-700'}">${realisasiBtt.toLocaleString('id-ID')}</b> / <b>${btt.toLocaleString('id-ID')}</b>
+          </span>
+        </div>
+
+        <!-- BTTK + BBTT-NU VS LAINNYA -->
+        <div class="flex justify-between items-center border-t border-slate-100 pt-1">
+          <span class="text-slate-600 font-medium">BTTK + NU <span class="text-[9px] text-slate-400">(Lainnya)</span></span>
+          <span class="font-mono">
+            <b class="${realisasiLainnya < targetBttkNu ? 'text-amber-600' : 'text-emerald-700'}">${realisasiLainnya.toLocaleString('id-ID')}</b> / <b>${targetBttkNu.toLocaleString('id-ID')}</b>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- SUMMARY TAGGING DAN GAP -->
+    <div class="space-y-1 text-[11px] bg-emerald-50/70 p-2 rounded-lg border border-emerald-200">
+      <div class="flex justify-between items-center">
+        <span class="text-emerald-900 font-medium">📍 Total Realisasi Tagging:</span>
+        <b class="text-emerald-800 text-xs font-mono">${totalTagged.toLocaleString('id-ID')} / ${targetMuatan.toLocaleString('id-ID')}</b>
+      </div>
+      <div class="flex justify-between items-center border-t border-emerald-200/80 pt-1">
+        <span class="font-bold ${gap > 0 ? 'text-red-700' : 'text-emerald-700'}">🔴 Total Selisih Gap:</span>
+        <b class="text-xs font-mono ${gap > 0 ? 'text-red-700 font-bold' : 'text-emerald-700'}">${gap.toLocaleString('id-ID')}</b>
+      </div>
+    </div>
+  </div>
+`;
 
       layer.bindPopup(popupHtml);
       slsLayerGroup.addLayer(layer);
@@ -811,18 +891,22 @@ export function renderDashboard(data) {
       }
     }
 
-    if (computedStatus === 'KRITIS' || computedStatus === 'PERHATIAN') {
+if (computedStatus !== 'AMAN') {
       const card = document.createElement('div');
-      card.className = "bg-slate-800/80 p-2.5 rounded-xl border-l-4 " + 
-        (computedStatus === 'KRITIS' ? "border-red-500" : "border-amber-500") + 
-        " hover:bg-slate-700/80 cursor-pointer text-xs transition shadow-sm";
+      
+      // Sinkronisasi Warna Border Kartu Sidebar dengan Ambang Batas Baru
+      let borderColor = "border-amber-500"; // Kuning (Gap 20-39)
+      if (computedStatus === 'KRITIS') borderColor = "border-red-500"; // Merah (Gap >= 50)
+      else if (gap >= 40) borderColor = "border-orange-500"; // Oranye (Gap 40-49)
+
+      card.className = `bg-slate-800/80 p-2.5 rounded-xl border-l-4 ${borderColor} hover:bg-slate-700/80 cursor-pointer text-xs transition shadow-sm`;
 
       card.innerHTML = `
         <div class="font-bold text-slate-100 text-[11px] truncate">${item.nama_sls || item.nmsls}</div>
         <div class="text-slate-400 text-[10px] mt-0.5">PCL: ${item.nama_pcl || '-'}</div>
         <div class="flex justify-between items-center text-[10px] text-slate-300 mt-1.5 pt-1 border-t border-slate-700/50">
           <span>Muatan: <b class="font-mono">${targetMuatan.toLocaleString('id-ID')}</b></span>
-          <span class="text-red-400 font-bold">Gap: ${gap.toLocaleString('id-ID')}</span>
+          <span class="font-bold" style="color: ${color}">Gap: ${gap.toLocaleString('id-ID')}</span>
         </div>
       `;
       

@@ -1,4 +1,4 @@
-import { setRawData, cachedDbPoints } from './state.js';
+import { setRawData, cachedDbPoints, cachedAnomaliPoints } from './state.js';
 import { showMapLoader, hideMapLoader } from './utils.js';
 import { initDynamicFilters, initJenisBangunanDropdown, applyFilters, getFilteredData } from './filters.js';
 import { initCsvUploader } from './csvUploader.js';
@@ -6,8 +6,9 @@ import {
   fetchAndRenderDbTagging, 
   fetchAndRenderGoogleBuildings, 
   fetchAndRenderAnomaliCluster, 
+  renderAnomaliClusterFromCache,
   renderDbTaggingFromCache, 
-  renderDashboard 
+  renderDashboard,
 } from './layers.js';
 
 // MAIN LOADER FUNCTION
@@ -52,9 +53,10 @@ map.on('moveend zoomend', () => {
       fetchAndRenderGoogleBuildings();
     }
 
+    // Gunakan render dari Cache lokal agar hemat Egress
     const toggleAnomaliEl = document.getElementById('toggle-anomali-cluster');
-    if (toggleAnomaliEl && toggleAnomaliEl.checked) {
-      fetchAndRenderAnomaliCluster();
+    if (toggleAnomaliEl && toggleAnomaliEl.checked && cachedAnomaliPoints.length > 0) {
+      renderAnomaliClusterFromCache();
     }
   }, 200);
 });
@@ -72,7 +74,7 @@ if (toggleGoogle) {
 
 const toggleAnomali = document.getElementById('toggle-anomali-cluster');
 if (toggleAnomali) {
-  toggleAnomali.addEventListener('change', fetchAndRenderAnomaliCluster);
+  toggleAnomali.addEventListener('change', () => fetchAndRenderAnomaliCluster(false));
 }
 
 // TOGGLE BARU: TAMPILKAN / SEMBUNYIKAN LABEL DETAIL (RE-RENDER INSTAN DARI CACHE)
