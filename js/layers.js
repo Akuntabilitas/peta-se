@@ -189,11 +189,12 @@ export async function fetchAndRenderDbTagging(forceRefetch = false) {
     return;
   }
 
-  const { data: points, error } = await supabaseClient
-    .from('tagged_buildings')
-    .select('no_bang, nama_bang, jenis_bangunan, kd_sls, geom')
-    .in('kd_sls', activeSlsCodes)
-    .in('jenis_bangunan', selectedJenis);
+// --- UBAH BAGIAN INI DI fetchAndRenderDbTagging ---
+const { data: points, error } = await supabaseClient
+  .from('view_tagged_buildings_analysis') // <- Ganti nama table ke View baru
+  .select('id, no_bang, nama_bang, jenis_bangunan, kd_sls, geom, is_cluster, is_outside_boundary')
+  .in('kd_sls', activeSlsCodes)
+  .in('jenis_bangunan', selectedJenis);
 
   hideMapLoader();
   if (statusEl) statusEl.classList.remove('status-loading');
@@ -293,7 +294,14 @@ export function renderDbTaggingFromCache() {
 
       if (isBadgeMode) {
         const noText = pt.no_bang ? `${pt.no_bang}` : '?';
-        const bgColor = style.fillColor || style.color || '#10b981';
+        let bgColor = style.fillColor || style.color || '#10b981';
+
+        // Penyesuaian warna mode badge sederhana
+        if (pt.is_cluster && pt.is_outside_boundary) {
+          bgColor = '#DC2626'; // Merah
+        } else if (pt.is_cluster || pt.is_outside_boundary) {
+          bgColor = '#D97706'; // Kuning / Amber
+        }
 
         const badgeIcon = L.divIcon({
           className: 'custom-num-badge-container',
@@ -307,11 +315,23 @@ export function renderDbTaggingFromCache() {
         dbTaggingLayerGroup.addLayer(badgeMarker);
 
       } else {
+        // Tentukan warna marker lingkaran
+        let circleColor = style.color;
+        let circleFill = style.fillColor;
+
+        if (pt.is_cluster && pt.is_outside_boundary) {
+          circleColor = "#991B1B";
+          circleFill = "#EF4444";
+        } else if (pt.is_cluster || pt.is_outside_boundary) {
+          circleColor = "#B45309";
+          circleFill = "#F59E0B";
+        }
+
         const circle = L.circleMarker([lat, lng], {
           interactive: true,
           radius: 6,
-          fillColor: style.fillColor,
-          color: style.color,
+          fillColor: circleFill,
+          color: circleColor,
           weight: 1.5,
           fillOpacity: 0.95
         });
@@ -323,10 +343,38 @@ export function renderDbTaggingFromCache() {
           const nameText = pt.nama_bang ? `${pt.nama_bang}` : 'Tanpa Nama';
           const slsNameText = slsInfo.nama_sls || '-';
 
+          // ==============================================================
+          // PENYESUAIAN WARNA BACKGROUND, BORDER, DAN TEKS LABEL
+          // ==============================================================
+          let boxStyleClass = "bg-white/95 border-emerald-500 text-slate-800 shadow-md";
+          let noTextClass = "text-emerald-700 font-extrabold";
+          let subTextClass = "text-gray-500 border-gray-200";
+          let badgeStatusHtml = "";
+
+          // 1. KLASTER & LUAR WILAYAH (MERAH MENOLOK)
+          if (pt.is_cluster && pt.is_outside_boundary) {
+            boxStyleClass = "bg-red-600 border-red-800 text-white shadow-xl ring-2 ring-red-400/50 animate-pulse";
+            noTextClass = "text-yellow-300 font-black";
+            subTextClass = "text-red-100 border-red-500/80";
+            badgeStatusHtml = `<span class="bg-red-950 text-red-200 text-[7.5px] px-1 rounded ml-1 font-bold border border-red-400">⚠️ KLASTER & LUAR SLS</span>`;
+          } 
+          // 2. HANYA KLASTER ATAU HANYA LUAR WILAYAH (KUNING/AMBER)
+          else if (pt.is_cluster || pt.is_outside_boundary) {
+            boxStyleClass = "bg-amber-400 border-amber-600 text-amber-950 shadow-lg ring-1 ring-amber-300";
+            noTextClass = "text-amber-900 font-black";
+            subTextClass = "text-amber-800 border-amber-500/60";
+            
+            if (pt.is_cluster) {
+              badgeStatusHtml = `<span class="bg-amber-100 text-amber-900 text-[7.5px] px-1 rounded ml-1 font-bold border border-amber-500">Klaster</span>`;
+            } else {
+              badgeStatusHtml = `<span class="bg-amber-100 text-amber-900 text-[7.5px] px-1 rounded ml-1 font-bold border border-amber-500">Luar Wilayah</span>`;
+            }
+          }
+
           const labelContent = `
-            <div class="leading-tight text-center">
-              <div><span class="font-bold text-emerald-800">${noText}</span> ${nameText}</div>
-              <div class="text-[8.5px] text-gray-500 font-normal border-t border-gray-200 mt-0.5 pt-0.5 truncate max-w-[150px]">${slsNameText}</div>
+            <div class="px-2 py-1 rounded-md border-2 leading-tight text-center ${boxStyleClass}">
+              <div class="text-[11px] font-bold"><span class="${noTextClass}">${noText}</span> ${nameText} ${badgeStatusHtml}</div>
+              <div class="text-[8.5px] font-normal border-t mt-0.5 pt-0.5 truncate max-w-[150px] ${subTextClass}">${slsNameText}</div>
             </div>
           `;
 
