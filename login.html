@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="id" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login - Hasil Tagging Sensus Ekonomi Boyolali</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/config.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans antialiased flex items-center justify-center min-h-screen px-4">
+
+  <div class="w-full max-w-sm space-y-5 bg-slate-900 p-7 rounded-2xl border border-slate-800 shadow-2xl">
+    <div class="text-center space-y-1">
+      <h1 class="text-lg font-black text-slate-100 tracking-wide flex items-center justify-center gap-2">
+        <span>HASIL TAGGING SE</span>
+        <span class="text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-800 px-2 py-0.5 rounded">BOYOLALI</span>
+      </h1>
+      <p class="text-xs text-slate-400">login menggunakan akun SEblak</p>
+    </div>
+
+    <div id="error-msg" class="hidden rounded-xl bg-red-950/60 p-3 text-xs text-red-300 border border-red-800/80 font-medium leading-relaxed"></div>
+
+    <form id="form-login" class="space-y-4">
+      <div>
+        <label class="block text-[11px] font-bold text-slate-400 uppercase mb-1">Email</label>
+        <input type="email" id="email" required placeholder="nama@bps.go.id / mitra@gmail.com" 
+          class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500 font-medium" />
+      </div>
+
+      <div>
+        <label class="block text-[11px] font-bold text-slate-400 uppercase mb-1">Kata Sandi</label>
+        <input type="password" id="password" required placeholder="••••••••" 
+          class="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500 font-medium" />
+      </div>
+
+      <button type="submit" id="btn-submit" 
+        class="w-full py-2.5 px-4 rounded-xl text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 transition-all shadow-lg mt-4 disabled:bg-slate-700 disabled:text-slate-500 cursor-pointer">
+        Masuk Dashboard
+      </button>
+    </form>
+  </div>
+
+  <script type="module">
+    import { PROFILE_CACHE_KEY } from './js/auth.js';
+
+    const form = document.getElementById('form-login');
+    const errorDiv = document.getElementById('error-msg');
+    const btnSubmit = document.getElementById('btn-submit');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errorDiv.classList.add('hidden');
+      btnSubmit.disabled = true;
+      btnSubmit.innerText = "Memverifikasi Hak Akses...";
+
+      const email = document.getElementById('email').value.trim().toLowerCase();
+      const password = document.getElementById('password').value;
+
+      try {
+        // 1. Sign In ke Proyek Supabase Auth Lama
+        const { data: authData, error: authErr } = await supabaseAuth.auth.signInWithPassword({ email, password });
+        if (authErr) throw authErr;
+
+        // 2. Query Paralel ke Database Proyek Baru
+        const [kantorRes, lapanganRes] = await Promise.all([
+          supabaseData.from('app_users').select('email, nama_pengguna, role, kecamatan_tugas').eq('email', email).maybeSingle(),
+          supabaseData.from('petugas').select('email, nama_petugas, posisi_tugas, kecamatan_tugas').eq('email', email).maybeSingle()
+        ]);
+
+        let profile = null;
+
+        if (kantorRes.data) {
+          profile = {
+            ...kantorRes.data,
+            role: (kantorRes.data.role || 'ADMIN').toUpperCase(),
+            tipe_akun: 'KANTOR'
+          };
+        } else if (lapanganRes.data) {
+          profile = {
+            email: lapanganRes.data.email,
+            nama_pengguna: lapanganRes.data.nama_petugas,
+            role: (lapanganRes.data.posisi_tugas || 'PML').toUpperCase(),
+            tipe_akun: 'LAPANGAN',
+            kecamatan_tugas: lapanganRes.data.kecamatan_tugas || null
+          };
+        }
+
+        if (!profile) {
+          await supabaseAuth.auth.signOut();
+          throw new Error('Akun Anda aktif, tetapi tidak terdaftar sebagai Pegawai maupun PML di aplikasi ini.');
+        }
+
+        // 3. BLOKIR PPL / PCL
+        if (profile.role === 'PPL' || profile.role === 'PCL') {
+          await supabaseAuth.auth.signOut();
+          throw new Error('Akses Ditolak: PPL / PCL tidak diberikan izin mengakses Dashboard Admin.');
+        }
+
+        // 4. Simpan Profil ke Session Storage
+        sessionStorage.setItem(PROFILE_CACHE_KEY, JSON.stringify(profile));
+
+        // Pengalihan ke Dashboard
+        window.location.href = 'index.html';
+
+      } catch (err) {
+        errorDiv.innerText = `⚠️ ${err.message || 'Email atau password salah.'}`;
+        errorDiv.classList.remove('hidden');
+      } finally {
+        btnSubmit.disabled = false;
+        btnSubmit.innerText = "Masuk Dashboard";
+      }
+    });
+  </script>
+</body>
+</html>

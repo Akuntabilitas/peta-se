@@ -1,4 +1,5 @@
 import { 
+  rawData,
   googleBuildingsCache, isDownloadingGoogle, setIsDownloadingGoogle,
   cachedDbPoints, setCachedDbPoints, lastFetchFilterKey, setLastFetchFilterKey,
   cachedAnomaliPoints, setCachedAnomaliPoints, lastAnomaliFilterKey, setLastAnomaliFilterKey,
@@ -7,8 +8,11 @@ import {
 
 import { showMapLoader, hideMapLoader, updateDownloadProgress, getDistanceInMeters, LocalDb } from './utils.js';
 import { getFilteredData, getSelectedJenisArray } from './filters.js';
+import { getLayerCacheFromIDB, setLayerCacheToIDB } from './dbCache.js';
 
-// --- GOOGLE BUILDINGS ---
+// =========================================================================
+// 1. GOOGLE BUILDINGS (LAYER FISIK BANGUNAN)
+// =========================================================================
 export async function fetchAndRenderGoogleBuildings() {
   googleBuildingsLayerGroup.clearLayers();
   const toggleEl = document.getElementById('toggle-google-buildings');
@@ -30,21 +34,28 @@ export async function fetchAndRenderGoogleBuildings() {
   const cacheKey = `google_buildings_kec_${kdKec}`;
   let allKecPoints = googleBuildingsCache.get(kdKec);
 
+  // A. Cek Cache Memori / IndexedDB Disk
   if (!allKecPoints) {
     if (statusEl) statusEl.innerText = "🔍 Memeriksa cache penyimpanan lokal browser...";
     
-    if (window.idbKeyval) {
-      allKecPoints = await idbKeyval.get(cacheKey);
-    } else {
-      allKecPoints = await LocalDb.get(cacheKey);
+    // Cek dari IndexedDB lewat helper dbCache / idbKeyval
+    allKecPoints = await getLayerCacheFromIDB(cacheKey);
+
+    if (!allKecPoints) {
+      if (window.idbKeyval) {
+        allKecPoints = await idbKeyval.get(cacheKey);
+      } else {
+        allKecPoints = await LocalDb.get(cacheKey);
+      }
     }
 
     if (allKecPoints && allKecPoints.length > 0) {
       googleBuildingsCache.set(kdKec, allKecPoints);
-      console.log(`⚡ Data Kec. ${kdKec} berhasil dimuat dari IndexedDB!`);
+      console.log(`⚡ [IndexedDB] Data Google Buildings Kec. ${kdKec} dimuat dari Cache Disk (0 KB Egress)`);
     }
   }
 
+  // B. Unduh dari Server Jika Belum Ada di Local Storage
   if (!allKecPoints) {
     if (isDownloadingGoogle) return;
     setIsDownloadingGoogle(true);
@@ -95,10 +106,10 @@ export async function fetchAndRenderGoogleBuildings() {
 
       googleBuildingsCache.set(kdKec, allKecPoints);
 
+      // Simpan ke IndexedDB
+      await setLayerCacheToIDB(cacheKey, allKecPoints);
       if (window.idbKeyval) {
         await idbKeyval.set(cacheKey, allKecPoints);
-      } else {
-        await LocalDb.set(cacheKey, allKecPoints);
       }
 
       updateDownloadProgress(true, `Selesai Mengunduh!`, 100, `Total ${allKecPoints.length.toLocaleString('id-ID')} titik tersimpan di Cache Browser`);
@@ -112,6 +123,7 @@ export async function fetchAndRenderGoogleBuildings() {
     }
   }
 
+  // Render Spasial berdasarkan Bounding Viewport Peta
   const filteredSlsSet = new Set(getFilteredData().map(d => String(d.kd_sls)));
   const mapBounds = map.getBounds();
   let count = 0;
@@ -149,99 +161,121 @@ export async function fetchAndRenderGoogleBuildings() {
   if (metricEl) metricEl.innerText = count.toLocaleString('id-ID');
 }
 
-// --- DB TAGGING (SMART BATCH FETCHING & CACHING SUPERIOR) ---
+// =========================================================================
+// 2. DB TAGGING (SMART INDEXEDDB & ZERO-EGRESS FETCHING)
+// =========================================================================
 export async function fetchAndRenderDbTagging(forceRefetch = false) {
   dbTaggingLayerGroup.clearLayers();
   const isChecked = document.getElementById('toggle-tagging-db')?.checked;
   
-  const filtered = getFilteredData();
-  const pmlVal = document.getElementById('filter-pml').value;
-  const pclVal = document.getElementById('filter-pcl').value;
-  const kecVal = document.getElementById('filter-kec').value;
+  const pmlVal = document.getElementById('filter-pml')?.value || '';
+  const pclVal = document.getElementById('filter-pcl')?.value || '';
+  const kecVal = document.getElementById('filter-kec')?.value || '';
   const selectedJenis = getSelectedJenisArray();
 
   if ((!kecVal && !pmlVal && !pclVal) || !isChecked || selectedJenis.length === 0) {
-    document.getElementById('upload-status').innerText = (!kecVal && !pmlVal && !pclVal) ? "💡 Titik disembunyikan di Level Kabupaten" : "";
-    document.getElementById('metric-db-tagging').innerText = "0";
+    const statusEl = document.getElementById('upload-status');
+    if (statusEl) {
+      statusEl.innerText = (!kecVal && !pmlVal && !pclVal) ? "💡 Titik disembunyikan di Level Kabupaten" : "";
+    }
+    const metricEl = document.getElementById('metric-db-tagging');
+    if (metricEl) metricEl.innerText = "0";
     return;
   }
 
-  // Master Cache Key hanya bergantung pada cakupan wilayah utama/petugas
-  const masterFetchKey = `fetch_${kecVal}_${pmlVal}_${pclVal}_${selectedJenis.join(',')}`;
+  // Master Cache Key Terikat pada Cakupan Wilayah Utama
+  const masterFetchKey = `db_tagging_kec_${kecVal}_pml_${pmlVal}_pcl_${pclVal}`;
 
+  // A. CEK CACHE MEMORI RAM (0 KB Egress / Instan)
   if (!forceRefetch && masterFetchKey === lastFetchFilterKey && cachedDbPoints.length > 0) {
     renderDbTaggingFromCache();
     return;
   }
 
+  // B. CEK CACHE INDEXEDDB DISK LOKAL (0 KB Egress)
+  if (!forceRefetch) {
+    const idbData = await getLayerCacheFromIDB(masterFetchKey);
+    if (idbData && idbData.length > 0) {
+      console.log(`⚡ [IndexedDB] Memuat ${idbData.length.toLocaleString('id-ID')} titik DB Tagging dari Disk Lokal (0 KB Egress)`);
+      setCachedDbPoints(idbData);
+      setLastFetchFilterKey(masterFetchKey);
+      renderDbTaggingFromCache();
+
+      const statusEl = document.getElementById('upload-status');
+      if (statusEl) {
+        statusEl.innerText = `⚡ ${idbData.length.toLocaleString('id-ID')} titik dimuat dari Cache Disk Lokal`;
+      }
+      return;
+    }
+  }
+
+  // C. JIKA TIDAK ADA DI INDEXEDDB, AMBIL DARI SUPABASE (1 SINGLE REQUEST)
   const statusEl = document.getElementById('upload-status');
   if (statusEl) {
-    statusEl.innerText = "⏳ Mempersiapkan pengunduhan data tagging...";
+    statusEl.innerText = "⏳ Memuat data tagging dari server...";
     statusEl.classList.add('status-loading');
   }
 
   showMapLoader("Mempersiapkan data tagging...");
 
-  const activeSlsCodes = filtered.map(d => String(d.kd_sls));
-  if (activeSlsCodes.length === 0) {
-    hideMapLoader();
-    if (statusEl) statusEl.classList.remove('status-loading');
-    return;
-  }
-
-  const CHUNK_SIZE = 150;
-  const allPoints = [];
-  const totalSls = activeSlsCodes.length;
-  const totalBatches = Math.ceil(totalSls / CHUNK_SIZE);
-
   try {
-    for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
-      const start = batchIndex * CHUNK_SIZE;
-      const end = start + CHUNK_SIZE;
-      const chunkSls = activeSlsCodes.slice(start, end);
+    let slsSource = rawData || [];
+    if (kecVal) slsSource = slsSource.filter(d => String(d.kd_kec) === String(kecVal));
+    if (pmlVal) slsSource = slsSource.filter(d => String(d.email_pml) === String(pmlVal));
+    if (pclVal) slsSource = slsSource.filter(d => String(d.email_pcl) === String(pclVal));
 
-      const percentProgress = Math.round(((batchIndex + 1) / totalBatches) * 100);
-      const infoText = `Memuat Batch ${batchIndex + 1}/${totalBatches} (${chunkSls.length} SLS)... [${percentProgress}%]`;
-      
-      if (statusEl) statusEl.innerText = `⏳ ${infoText}`;
-      showMapLoader(`Memuat titik tagging... ${percentProgress}%`);
-
-      const { data: pointsChunk, error } = await supabaseClient
-        .from('view_tagged_buildings_analysis')
-        .select('id, no_bang, nama_bang, jenis_bangunan, kd_sls, geom, is_cluster, is_outside_boundary')
-        .in('kd_sls', chunkSls)
-        .in('jenis_bangunan', selectedJenis);
-
-      if (error) throw error;
-      if (pointsChunk && pointsChunk.length > 0) {
-        allPoints.push(...pointsChunk);
+    const activeSlsCodes = Array.from(new Set(slsSource.map(d => String(d.kd_sls))));
+    
+    if (activeSlsCodes.length === 0) {
+      hideMapLoader();
+      if (statusEl) {
+        statusEl.innerText = "⚠️ Tidak ada data SLS ditemukan untuk filter ini.";
+        statusEl.classList.remove('status-loading');
       }
+      return;
     }
 
+    showMapLoader(`Mengunduh titik tagging (${activeSlsCodes.length} SLS)...`);
+
+    // 1 Kueri tunggal untuk mengunduh seluruh jenis bangunan di kecamatan ini
+    const { data: remotePoints, error } = await supabaseClient
+      .from('view_tagged_buildings_analysis')
+      .select('id, no_bang, nama_bang, jenis_bangunan, kd_sls, geom, is_cluster, is_outside_boundary')
+      .in('kd_sls', activeSlsCodes);
+
+    if (error) throw error;
+
+    const allPoints = remotePoints || [];
+
+    // Simpan ke Memori RAM & IndexedDB Disk
     setCachedDbPoints(allPoints);
     setLastFetchFilterKey(masterFetchKey);
+    await setLayerCacheToIDB(masterFetchKey, allPoints);
+
     renderDbTaggingFromCache();
 
     if (statusEl) {
-      statusEl.innerText = `✅ Berhasil memuat ${allPoints.length.toLocaleString('id-ID')} titik tagging (${totalSls} SLS)`;
+      statusEl.innerText = `✅ Berhasil memuat ${allPoints.length.toLocaleString('id-ID')} titik tagging (Tersimpan di Cache IDB)`;
     }
 
   } catch (err) {
     console.error("Terjadi kesalahan saat memuat data tagging:", err);
-    if (statusEl) statusEl.innerText = "⚠️ Gagal mengambil beberapa/seluruh data tagging dari server";
+    if (statusEl) statusEl.innerText = "⚠️ Gagal mengambil data tagging dari server: " + (err.message || err);
   } finally {
     hideMapLoader();
     if (statusEl) statusEl.classList.remove('status-loading');
   }
 }
 
-// RENDER INSTAN DARI CACHE DENGAN SPATIAL BOUNDING FILTERING (NO-LAG 40K POINTS)
+// RENDER INSTAN DARI CACHE DENGAN SPATIAL BOUNDING FILTERING
 export function renderDbTaggingFromCache() {
   dbTaggingLayerGroup.clearLayers();
 
-  const kecVal = document.getElementById('filter-kec').value;
-  const desaVal = document.getElementById('filter-desa').value;
-  const slsVal = document.getElementById('filter-sls').value;
+  const kecVal = document.getElementById('filter-kec')?.value || '';
+  const desaVal = document.getElementById('filter-desa')?.value || '';
+  const slsVal = document.getElementById('filter-sls')?.value || '';
+  const selectedJenis = getSelectedJenisArray();
+  const selectedJenisSet = new Set(selectedJenis);
 
   const toggleLabelsEl = document.getElementById('toggle-detailed-labels');
   const isLabelToggleActive = toggleLabelsEl ? toggleLabelsEl.checked : true;
@@ -256,7 +290,7 @@ export function renderDbTaggingFromCache() {
 
   let count = 0;
   let renderedLabelsCount = 0;
-  const MAX_PERMANENT_LABELS = 400; // Mencegah DOM Overload
+  const MAX_PERMANENT_LABELS = 400;
   const occupiedBoxes = [];
 
   const placementCandidates = [
@@ -270,9 +304,11 @@ export function renderDbTaggingFromCache() {
   }
 
   cachedDbPoints.forEach(pt => {
+    // Filter Lokal Jenis Bangunan
+    if (selectedJenisSet.size > 0 && !selectedJenisSet.has(Number(pt.jenis_bangunan))) return;
+
     const slsInfo = slsLookupMap.get(String(pt.kd_sls)) || {};
 
-    // Saring lokal secara instan tanpa panggil Supabase lagi
     if (slsVal && String(pt.kd_sls) !== String(slsVal)) return;
     if (desaVal && String(slsInfo.kd_desa) !== String(desaVal)) return;
     if (kecVal && String(slsInfo.kd_kec) !== String(kecVal)) return;
@@ -281,7 +317,6 @@ export function renderDbTaggingFromCache() {
     if (pt.geom && pt.geom.coordinates) [lng, lat] = pt.geom.coordinates;
 
     if (lat && lng) {
-      // SPATIAL BOUNDING CHECK: Hanya gambar titik yang tampak di layar
       if (!mapBounds.contains([lat, lng])) return;
 
       count++;
@@ -465,20 +500,21 @@ export function renderDbTaggingFromCache() {
 
   const statusEl = document.getElementById('upload-status');
   if (statusEl) statusEl.innerText = `✅ ${count.toLocaleString('id-ID')} titik tampak dimuat (Total Cache: ${cachedDbPoints.length.toLocaleString('id-ID')})`;
-  document.getElementById('metric-db-tagging').innerText = cachedDbPoints.length.toLocaleString('id-ID');
+  const metricDbEl = document.getElementById('metric-db-tagging');
+  if (metricDbEl) metricDbEl.innerText = cachedDbPoints.length.toLocaleString('id-ID');
 }
 
-// --- ANOMALI CLUSTER (FIX TIMEOUT & OPTIMAL FETCHING) ---
+// =========================================================================
+// 3. ANOMALI CLUSTER (INDEXEDDB SMART CACHING)
+// =========================================================================
 export async function fetchAndRenderAnomaliCluster(forceRefetch = false) {
   anomaliClusterLayerGroup.clearLayers();
   const isChecked = document.getElementById('toggle-anomali-cluster')?.checked;
   
-  const filtered = getFilteredData();
   const pmlVal = document.getElementById('filter-pml')?.value || '';
   const pclVal = document.getElementById('filter-pcl')?.value || '';
   const kecVal = document.getElementById('filter-kec')?.value || '';
 
-  // Jangan load di level Kabupaten/tanpa filter aktif untuk mencegah query membengkak
   if ((!kecVal && !pmlVal && !pclVal) || !isChecked) {
     const metricEl = document.getElementById('metric-anomali');
     if (metricEl) metricEl.innerText = "0";
@@ -486,44 +522,45 @@ export async function fetchAndRenderAnomaliCluster(forceRefetch = false) {
     return;
   }
 
-  const masterAnomaliKey = `anomali_${kecVal}_${pmlVal}_${pclVal}`;
+  const masterAnomaliKey = `anomali_kec_${kecVal}_pml_${pmlVal}_pcl_${pclVal}`;
 
-  // Gunakan cache lokal jika filter belum berubah dan tidak di-force refetch
+  // A. CEK CACHE MEMORI RAM
   if (!forceRefetch && masterAnomaliKey === lastAnomaliFilterKey && cachedAnomaliPoints.length > 0) {
     renderAnomaliClusterFromCache();
     return;
   }
 
-  // Deduplikasi kode SLS (membuang duplikat)
-  const activeSlsCodes = Array.from(new Set(filtered.map(d => String(d.kd_sls))));
+  // B. CEK CACHE INDEXEDDB DISK LOKAL
+  if (!forceRefetch) {
+    const idbData = await getLayerCacheFromIDB(masterAnomaliKey);
+    if (idbData && idbData.length > 0) {
+      console.log(`⚡ [IndexedDB] Memuat ${idbData.length} data anomali dari Disk Lokal (0 KB Egress)`);
+      setCachedAnomaliPoints(idbData);
+      setLastAnomaliFilterKey(masterAnomaliKey);
+      renderAnomaliClusterFromCache();
+      return;
+    }
+  }
+
+  // C. JIKA TIDAK ADA DI IDB, AMBIL DARI SUPABASE (1 SINGLE REQUEST)
+  const activeSlsCodes = Array.from(new Set(getFilteredData().map(d => String(d.kd_sls))));
   if (activeSlsCodes.length === 0) return;
 
-  const allAnomalies = [];
-  const CHUNK_SIZE = 40; // Dipecah per 40 SLS agar query PostGIS sangat ringan & bebas timeout
-  const totalBatches = Math.ceil(activeSlsCodes.length / CHUNK_SIZE);
-
   try {
-    for (let i = 0; i < totalBatches; i++) {
-      const chunkSls = activeSlsCodes.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+    const { data: anomalies, error } = await supabaseClient
+      .from('view_anomali_tagging_mengumpul')
+      .select('kd_sls, no_bang, nama_bang, jenis_bangunan, geom, nmkec, nmdesa, nama_sls, nama_pcl, nama_pml')
+      .in('kd_sls', activeSlsCodes);
 
-      const { data: anomalies, error } = await supabaseClient
-        .from('view_anomali_tagging_mengumpul')
-        .select('kd_sls, no_bang, nama_bang, jenis_bangunan, geom, nmkec, nmdesa, nama_sls, nama_pcl, nama_pml')
-        .in('kd_sls', chunkSls)
-        .limit(2000);
+    if (error) throw error;
 
-      if (error) {
-        console.warn(`⚠️ Batch anomali ke-${i + 1} dilewati (Timeout/Error):`, error.message);
-        continue; // Lanjutkan batch lain jika 1 batch bermasalah
-      }
+    const allAnomalies = anomalies || [];
 
-      if (anomalies && anomalies.length > 0) {
-        allAnomalies.push(...anomalies);
-      }
-    }
-
+    // Simpan ke Memori RAM & IndexedDB Disk
     setCachedAnomaliPoints(allAnomalies);
     setLastAnomaliFilterKey(masterAnomaliKey);
+    await setLayerCacheToIDB(masterAnomaliKey, allAnomalies);
+
     renderAnomaliClusterFromCache();
 
   } catch (err) {
@@ -535,13 +572,14 @@ export function renderAnomaliClusterFromCache() {
   anomaliClusterLayerGroup.clearLayers();
 
   if (!cachedAnomaliPoints || cachedAnomaliPoints.length === 0) {
-    document.getElementById('metric-anomali').innerText = "0";
+    const metricEl = document.getElementById('metric-anomali');
+    if (metricEl) metricEl.innerText = "0";
     return;
   }
 
-  const kecVal = document.getElementById('filter-kec').value;
-  const desaVal = document.getElementById('filter-desa').value;
-  const slsVal = document.getElementById('filter-sls').value;
+  const kecVal = document.getElementById('filter-kec')?.value || '';
+  const desaVal = document.getElementById('filter-desa')?.value || '';
+  const slsVal = document.getElementById('filter-sls')?.value || '';
 
   const uniqueAnomalies = [];
   const seenKeys = new Set();
@@ -728,21 +766,36 @@ export function renderAnomaliClusterFromCache() {
     }
   });
 
-  document.getElementById('metric-anomali').innerText = totalPointsCount.toLocaleString('id-ID');
+  const metricAnomaliEl = document.getElementById('metric-anomali');
+  if (metricAnomaliEl) metricAnomaliEl.innerText = totalPointsCount.toLocaleString('id-ID');
 }
 
-// --- DASHBOARD SLS & SIDEBAR ---
+// =========================================================================
+// 4. DASHBOARD SLS & SIDEBAR (O(N) MAP LOOKUP OPTIMIZED)
+// =========================================================================
 export function renderDashboard(data) {
   slsLayerGroup.clearLayers();
   const listContainer = document.getElementById('sls-list');
+  if (!listContainer) return;
   listContainer.innerHTML = '';
 
   let totalGap = 0, countKritis = 0;
   const currentZoom = map.getZoom();
   const mapBounds = map.getBounds();
 
+  // Optimasi Hash Map untuk pencarian titik SLS berkecepatan 0 ms
+  const dbPointsMapBySls = new Map();
+  cachedDbPoints.forEach(pt => {
+    const slsCode = String(pt.kd_sls).trim();
+    if (!dbPointsMapBySls.has(slsCode)) {
+      dbPointsMapBySls.set(slsCode, []);
+    }
+    dbPointsMapBySls.get(slsCode).push(pt);
+  });
+
   data.forEach(item => {
-    const csvCount = uploadedTaggingMap.get(String(item.kd_sls)) || 0;
+    const itemSlsCode = String(item.kd_sls).trim();
+    const csvCount = uploadedTaggingMap.get(itemSlsCode) || 0;
     const totalTagged = (item.total_realisasi_tagging || 0) + csvCount;
     
     const btt = item.btt_pemetaan || 0;
@@ -755,37 +808,32 @@ export function renderDashboard(data) {
     const gap = targetMuatan - totalTagged;
     if (gap > 0) totalGap += gap;
 
-    // --- PENENTUAN WARNA BERTINGKAT BERDASARKAN GAP ---
     let computedStatus = 'AMAN';
-    let color = "#3B82F6"; // Biru Default (Gap < 20)
+    let color = "#3B82F6"; 
 
     if ((totalTagged === 0 && targetMuatan > 10) || gap >= 50) {
       computedStatus = 'KRITIS';
-      color = "#EF4444"; // Merah
+      color = "#EF4444"; 
       countKritis++;
     } 
     else if (gap >= 40) {
       computedStatus = 'PERHATIAN (TINGGI)';
-      color = "#F97316"; // Oranye
+      color = "#F97316"; 
     } 
     else if (gap >= 20) {
       computedStatus = 'PERHATIAN';
-      color = "#F59E0B"; // Kuning / Amber
+      color = "#F59E0B"; 
     }
 
-    // Hitung realisasi tagging spesifik SLS dari cache secara presisi (String comparison)
-    const slsPoints = cachedDbPoints.filter(pt => String(pt.kd_sls).trim() === String(item.kd_sls).trim());
+    const slsPoints = dbPointsMapBySls.get(itemSlsCode) || [];
 
-    // BTT: Jenis Bangunan 2 dan 3
     const realisasiBtt = slsPoints.filter(pt => {
       const j = Number(pt.jenis_bangunan);
       return j === 2 || j === 3;
     }).length;
 
-    // BKU: Jenis Bangunan 1
     const realisasiBku = slsPoints.filter(pt => Number(pt.jenis_bangunan) === 1).length;
 
-    // BTTK + BBTT-NU: Selain Jenis Bangunan 1, 2, dan 3
     const realisasiLainnya = slsPoints.filter(pt => {
       const j = Number(pt.jenis_bangunan);
       return ![1, 2, 3].includes(j);
@@ -918,7 +966,12 @@ export function renderDashboard(data) {
     }
   });
 
-  document.getElementById('metric-gap').innerText = totalGap.toLocaleString('id-ID');
-  document.getElementById('metric-kritis').innerText = countKritis;
-  document.getElementById('sls-count').innerText = `${data.length} SLS`;
+  const metricGapEl = document.getElementById('metric-gap');
+  if (metricGapEl) metricGapEl.innerText = totalGap.toLocaleString('id-ID');
+  
+  const metricKritisEl = document.getElementById('metric-kritis');
+  if (metricKritisEl) metricKritisEl.innerText = countKritis;
+
+  const slsCountEl = document.getElementById('sls-count');
+  if (slsCountEl) slsCountEl.innerText = `${data.length} SLS`;
 }
