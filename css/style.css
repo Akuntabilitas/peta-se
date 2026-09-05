@@ -188,3 +188,52 @@
 .leaflet-popup-tip {
   background: #ffffff !important;
 }
+
+/* CONTAINER & STYLE LABEL TRANSPARAN POLIGON SLS */
+.custom-sls-center-label-container {
+  background: transparent !important;
+  border: none !important;
+}
+
+.sls-center-poly-label {
+  background-color: rgba(15, 23, 42, 0.75); /* Dark semi-transparent */
+  backdrop-filter: blur(4px);
+  color: #f8fafc;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  text-align: center;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+}
+
+.sls-poly-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: #38bdf8; /* Light blue accent */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+  margin: 0 auto;
+}
+
+.sls-poly-details {
+  font-size: 8.5px;
+  color: #cbd5e1;
+  line-height: 1.2;
+  margin-top: 1px;
+}
+
+.sls-poly-details b {
+  color: #ffffff;
+}
+
+.sls-poly-tagging {
+  font-size: 9px;
+  color: #34d399; /* Emerald accent */
+  margin-top: 2px;
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+  padding-top: 1px;
+}

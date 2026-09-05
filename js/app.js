@@ -1,6 +1,9 @@
 let rawData = [];
 let slsLookupMap = new Map();
 let uploadedTaggingMap = new Map();
+// CACHE LOKAL GOOGLE BUILDINGS PER KECAMATAN
+let googleBuildingsCache = new Map(); // Key: kd_kec, Value: Array of points
+let isDownloadingGoogle = false;
 
 // IN-MEMORY CACHE UNTUK MENCEGAH RE-FETCH KE SUPABASE
 let cachedDbPoints = [];
@@ -217,60 +220,206 @@ function populateSelectSLS(elementId, dataset, currentValue, defaultText) {
   });
 }
 
-// SPATIAL FETCHING & RENDERING (GOOGLE BUILDINGS)
+// HELPER UNTUK MENGONTROL PROGRESS BAR DOWNLOAD
+function updateDownloadProgress(show, title = "", percent = 0, subtext = "") {
+  const container = document.getElementById('download-progress-container');
+  const titleEl = document.getElementById('download-progress-title');
+  const percentEl = document.getElementById('download-progress-percent');
+  const barEl = document.getElementById('download-progress-bar');
+  const subtextEl = document.getElementById('download-progress-subtext');
+
+  if (!container) return;
+
+  if (show) {
+    container.classList.remove('hidden');
+    if (titleEl) titleEl.innerHTML = `<span class="animate-spin">⏳</span> ${title}`;
+    if (percentEl) percentEl.innerText = `${percent}%`;
+    if (barEl) barEl.style.width = `${percent}%`;
+    if (subtextEl) subtextEl.innerText = subtext;
+  } else {
+    container.classList.add('hidden');
+  }
+}
+
+// HELPER NATIVE INDEXEDDB (SOLUSI TANPA KETERGANTUNGAN LIBRARY EXTERNAL)
+const LocalDb = {
+  dbName: 'GoogleBuildingsCacheDB',
+  storeName: 'kecamatan_buildings',
+  
+  async getDb() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(this.dbName, 1);
+      request.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(this.storeName)) {
+          db.createObjectStore(this.storeName);
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  },
+
+  async get(key) {
+    try {
+      const db = await this.getDb();
+      return new Promise((resolve) => {
+        const tx = db.transaction(this.storeName, 'readonly');
+        const store = tx.objectStore(this.storeName);
+        const req = store.get(key);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      });
+    } catch (e) {
+      console.warn("Gagal membaca dari IndexedDB:", e);
+      return null;
+    }
+  },
+
+  async set(key, value) {
+    try {
+      const db = await this.getDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(this.storeName, 'readwrite');
+        const store = tx.objectStore(this.storeName);
+        const req = store.put(value, key);
+        req.onsuccess = () => resolve(true);
+        req.onerror = () => reject(req.error);
+      });
+    } catch (e) {
+      console.warn("Gagal menyimpan ke IndexedDB:", e);
+    }
+  }
+};
+
+// SPATIAL FETCHING & RENDERING (DENGAN PERSISTENT INDEXEDDB CACHE MANDIRI)
 async function fetchAndRenderGoogleBuildings() {
   googleBuildingsLayerGroup.clearLayers();
-  const isChecked = document.getElementById('toggle-google-buildings').checked;
-  
-  const kdKec = document.getElementById('filter-kec').value;
-  const kdDesa = document.getElementById('filter-desa').value;
-  const kdSls = document.getElementById('filter-sls').value;
-  const emailPcl = document.getElementById('filter-pcl').value;
-  const emailPml = document.getElementById('filter-pml').value;
+  const toggleEl = document.getElementById('toggle-google-buildings');
+  const kecEl = document.getElementById('filter-kec');
+  const statusEl = document.getElementById('upload-status');
+  const metricEl = document.getElementById('metric-google-drawn');
 
-  if ((!kdKec && !emailPcl && !emailPml) || !isChecked) {
-    document.getElementById('metric-google-drawn').innerText = "0";
-    return;
-  }
+  const isChecked = toggleEl ? toggleEl.checked : false;
+  // Pastikan kdKec berupa string rapi tanpa spasi tambahan
+  const kdKec = kecEl && kecEl.value ? String(kecEl.value).trim() : '';
 
-  showMapLoader("Memuat titik Google Buildings...");
-
-  let query = supabaseClient
-    .from('building_footprints')
-    .select('id, area_in_meters, confidence, geom')
-    .gte('confidence', 0.75)
-    .limit(20000);
-
-  if (kdSls) {
-    query = query.eq('kd_sls', kdSls);
-  } else if (kdDesa && kdKec) {
-    query = query.like('kd_sls', `3309${kdKec}${kdDesa}%`);
-  } else if (kdKec) {
-    query = query.like('kd_sls', `3309${kdKec}%`);
-  } else {
-    const filteredSls = getFilteredData().map(d => d.kd_sls).slice(0, 50);
-    if (filteredSls.length === 0) {
-      hideMapLoader();
-      return;
+  if (!kdKec || !isChecked) {
+    if (metricEl) metricEl.innerText = "0";
+    if (!kdKec && isChecked && statusEl) {
+      statusEl.innerText = "💡 Google Buildings hanya aktif saat Kecamatan dipilih";
     }
-    query = query.in('kd_sls', filteredSls);
-  }
-
-  const { data: buildings, error } = await query;
-  hideMapLoader();
-
-  if (error) {
-    console.error("Gagal memuat titik Google:", error);
-    document.getElementById('upload-status').innerText = "⚠️ Gagal memuat titik Google (Timeout)";
     return;
   }
+
+  const cacheKey = `google_buildings_kec_${kdKec}`;
+  let allKecPoints = null;
+
+  // 1. CEK LAYER 1: RAM MAP CACHE
+  allKecPoints = googleBuildingsCache.get(kdKec);
+
+  // 2. CEK LAYER 2: INDEXEDDB BROWSER (PERSISTEN SAAT REFRESH)
+  if (!allKecPoints) {
+    if (statusEl) statusEl.innerText = "🔍 Memeriksa cache penyimpanan lokal browser...";
+    
+    // Gunakan idbKeyval jika ada, atau fallback ke Native LocalDb
+    if (window.idbKeyval) {
+      allKecPoints = await idbKeyval.get(cacheKey);
+    } else {
+      allKecPoints = await LocalDb.get(cacheKey);
+    }
+
+    if (allKecPoints && allKecPoints.length > 0) {
+      // Simpan kembali ke memory RAM agar navigasi berikutnya lebih cepat
+      googleBuildingsCache.set(kdKec, allKecPoints);
+      console.log(`⚡ Data Kec. ${kdKec} berhasil dimuat dari IndexedDB!`);
+    }
+  }
+
+  // 3. JIKA SAMA SEKALI BELUM ADA DI INDEXEDDB, BARU UNDUH DARI SUPABASE
+  if (!allKecPoints) {
+    if (isDownloadingGoogle) return;
+    isDownloadingGoogle = true;
+
+    allKecPoints = [];
+    const chunkSize = 2000;
+    let offset = 0;
+    let hasMore = true;
+
+    updateDownloadProgress(true, `Mengunduh Asset Kec. ${kdKec}...`, 5, "Mempersiapkan data dari server...");
+
+    try {
+      while (hasMore) {
+        const { data: batchData, error } = await supabaseClient
+          .rpc('get_google_buildings_paged', {
+            target_kd_kec: kdKec,
+            page_limit: chunkSize,
+            page_offset: offset
+          });
+
+        if (error) {
+          console.error("Gagal mengunduh batch Google Buildings:", error);
+          if (statusEl) statusEl.innerText = "⚠️ Gagal mengunduh data paket Google";
+          updateDownloadProgress(false);
+          isDownloadingGoogle = false;
+          return;
+        }
+
+        const currentBatch = batchData || [];
+        allKecPoints.push(...currentBatch);
+
+        if (currentBatch.length < chunkSize) {
+          hasMore = false;
+        } else {
+          offset += chunkSize;
+        }
+
+        const estimatedTotal = Math.max(allKecPoints.length + 2000, 10000);
+        const calcPercent = hasMore ? Math.min(Math.round((allKecPoints.length / estimatedTotal) * 100), 95) : 100;
+
+        updateDownloadProgress(
+          true, 
+          `Mengunduh Asset Kec. ${kdKec}...`, 
+          calcPercent, 
+          `Tergugat: ${allKecPoints.length.toLocaleString('id-ID')} titik`
+        );
+      }
+
+      // 💾 SIMPAN HASIL UNDUHAN KE RAM DAN INDEXEDDB
+      googleBuildingsCache.set(kdKec, allKecPoints);
+
+      if (window.idbKeyval) {
+        await idbKeyval.set(cacheKey, allKecPoints);
+      } else {
+        await LocalDb.set(cacheKey, allKecPoints);
+      }
+
+      updateDownloadProgress(true, `Selesai Mengunduh!`, 100, `Total ${allKecPoints.length.toLocaleString('id-ID')} titik tersimpan di Cache Browser`);
+      setTimeout(() => updateDownloadProgress(false), 1500);
+
+    } catch (err) {
+      console.error("Terjadi kesalahan unduh:", err);
+      updateDownloadProgress(false);
+    } finally {
+      isDownloadingGoogle = false;
+    }
+  }
+
+  // 4. RENDER TITIK PADA PETA
+  const filteredSlsSet = new Set(getFilteredData().map(d => d.kd_sls));
+  const mapBounds = map.getBounds();
 
   let count = 0;
-  buildings.forEach(b => {
+
+  allKecPoints.forEach(b => {
+    if (filteredSlsSet.size > 0 && !filteredSlsSet.has(b.kd_sls)) return;
+
     let lat, lng;
     if (b.geom && b.geom.coordinates) [lng, lat] = b.geom.coordinates;
 
     if (lat && lng) {
+      if (!mapBounds.contains([lat, lng])) return;
+
       count++;
       const circle = L.circleMarker([lat, lng], {
         interactive: true,
@@ -283,6 +432,7 @@ async function fetchAndRenderGoogleBuildings() {
         <div class="text-xs text-gray-800 font-sans">
           <strong class="text-yellow-700 block mb-1">🟡 Fisik Rumah (Google Building)</strong>
           <div>Luas Bangunan: <b>${b.area_in_meters || '-'} m²</b></div>
+          <div class="text-[10px] text-gray-500 mt-1">Kode SLS: <code>${b.kd_sls}</code></div>
         </div>
       `);
 
@@ -290,8 +440,8 @@ async function fetchAndRenderGoogleBuildings() {
     }
   });
 
-  document.getElementById('upload-status').innerText = `✅ ${count.toLocaleString()} titik Google dimuat`;
-  document.getElementById('metric-google-drawn').innerText = count.toLocaleString('id-ID');
+  if (statusEl) statusEl.innerText = `⚡ ${count.toLocaleString('id-ID')} titik Google dimuat dari Cache (Total: ${allKecPoints.length.toLocaleString('id-ID')})`;
+  if (metricEl) metricEl.innerText = count.toLocaleString('id-ID');
 }
 
 // FETCH & RENDER DENGAN CACHE LOKAL (TAGGING FIELD)
@@ -338,7 +488,7 @@ async function fetchAndRenderDbTagging(forceRefetch = false) {
   const { data: points, error } = await supabaseClient
     .from('tagged_buildings')
     .select('no_bang, nama_bang, jenis_bangunan, kd_sls, geom')
-    .in('kd_sls', activeSlsCodes.slice(0, 500))
+    .in('kd_sls', activeSlsCodes)
     .in('jenis_bangunan', selectedJenis);
 
   hideMapLoader();
@@ -352,10 +502,10 @@ async function fetchAndRenderDbTagging(forceRefetch = false) {
   renderDbTaggingFromCache();
 }
 
-// RENDER DB TAGGING DARI CACHE DENGAN DUA MODE VISUAL
 function renderDbTaggingFromCache() {
   dbTaggingLayerGroup.clearLayers();
 
+  const kecVal = document.getElementById('filter-kec').value;
   const desaVal = document.getElementById('filter-desa').value;
   const slsVal = document.getElementById('filter-sls').value;
   const pclVal = document.getElementById('filter-pcl').value;
@@ -374,9 +524,7 @@ function renderDbTaggingFromCache() {
 
   const occupiedBoxes = [];
 
-  // CANDIDATE PLACEMENT RING 1 S.D RING 4
   const placementCandidates = [
-    // Ring 1 (Jarak Dekat ~15px)
     { x: 15, y: 0, dir: 'right' },
     { x: -15, y: 0, dir: 'left' },
     { x: 0, y: -18, dir: 'top' },
@@ -386,7 +534,6 @@ function renderDbTaggingFromCache() {
     { x: 18, y: 18, dir: 'right' },
     { x: -18, y: 18, dir: 'left' },
 
-    // Ring 2 (Jarak Sedang ~35px)
     { x: 35, y: 0, dir: 'right' },
     { x: -35, y: 0, dir: 'left' },
     { x: 0, y: -35, dir: 'top' },
@@ -396,7 +543,6 @@ function renderDbTaggingFromCache() {
     { x: 32, y: 32, dir: 'right' },
     { x: -32, y: 32, dir: 'left' },
 
-    // Ring 3 (Jarak Jauh ~52px)
     { x: 52, y: 0, dir: 'right' },
     { x: -52, y: 0, dir: 'left' },
     { x: 0, y: -52, dir: 'top' },
@@ -406,7 +552,6 @@ function renderDbTaggingFromCache() {
     { x: 48, y: 48, dir: 'right' },
     { x: -48, y: 48, dir: 'left' },
 
-    // Ring 4 (Jarak Sangat Jauh ~70px)
     { x: 70, y: 0, dir: 'right' },
     { x: -70, y: 0, dir: 'left' },
     { x: 0, y: -70, dir: 'top' },
@@ -425,15 +570,20 @@ function renderDbTaggingFromCache() {
   }
 
   cachedDbPoints.forEach(pt => {
+    const slsInfo = slsLookupMap.get(pt.kd_sls) || {};
+
+    if (slsVal && pt.kd_sls !== slsVal) return;
+    if (desaVal && slsInfo.kd_desa !== desaVal) return;
+    if (kecVal && slsInfo.kd_kec !== kecVal) return;
+
     let lat, lng;
     if (pt.geom && pt.geom.coordinates) [lng, lat] = pt.geom.coordinates;
 
     if (lat && lng) {
-      count++;
-      
       if (!mapBounds.contains([lat, lng])) return;
 
-      const slsInfo = slsLookupMap.get(pt.kd_sls) || {};
+      count++;
+
       const style = getJenisBangunanStyle(pt.jenis_bangunan);
 
       const popupHtml = `
@@ -470,7 +620,6 @@ function renderDbTaggingFromCache() {
         </div>
       `;
 
-      // MODE 1: BADGE NOMOR (FILTER DESA/SLS AKTIF & ZOOM < 21)
       if (isBadgeMode) {
         const noText = pt.no_bang ? `${pt.no_bang}` : '?';
         const bgColor = style.fillColor || style.color || '#10b981';
@@ -486,7 +635,6 @@ function renderDbTaggingFromCache() {
         badgeMarker.bindPopup(popupHtml);
         dbTaggingLayerGroup.addLayer(badgeMarker);
 
-      // MODE 2: CIRCLE MARKER + LABEL DETAIL LENGKAP
       } else {
         const circle = L.circleMarker([lat, lng], {
           interactive: true,
@@ -575,8 +723,8 @@ function renderDbTaggingFromCache() {
     }
   });
 
-  document.getElementById('upload-status').innerText = `✅ ${count.toLocaleString()} titik wilayah dimuat`;
-  document.getElementById('metric-db-tagging').innerText = count.toLocaleString('id-ID');
+  document.getElementById('upload-status').innerText = `✅ ${count.toLocaleString('id-ID')} titik wilayah dimuat`;
+  document.getElementById('metric-db-tagging').innerText = cachedDbPoints.length.toLocaleString('id-ID');
 }
 
 // HELPER HITUNG JARAK METER (HAVERSINE FORMULA)
@@ -591,7 +739,7 @@ function getDistanceInMeters(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// MEMUAT KLASTER ANOMALI ADAPTIF
+// MEMUAT KLASTER ANOMALI ADAPTIF (BERTINGKAT SESUAI ZOOM)
 async function fetchAndRenderAnomaliCluster() {
   anomaliClusterLayerGroup.clearLayers();
   const isChecked = document.getElementById('toggle-anomali-cluster').checked;
@@ -662,6 +810,7 @@ async function fetchAndRenderAnomaliCluster() {
     const pointCount = clusterGroup.length;
     totalPointsCount += pointCount;
 
+    // Hitung titik pusat klaster
     let sumLat = 0, sumLng = 0;
     clusterGroup.forEach(pt => {
       let [lng, lat] = pt.geom.coordinates;
@@ -671,7 +820,20 @@ async function fetchAndRenderAnomaliCluster() {
     const centerLat = sumLat / pointCount;
     const centerLng = sumLng / pointCount;
 
+    // Hitung radius terjauh dari pusat untuk zona merah
+    let maxDist = 0;
+    clusterGroup.forEach(pt => {
+      let [lng, lat] = pt.geom.coordinates;
+      const d = getDistanceInMeters(centerLat, centerLng, lat, lng);
+      if (d > maxDist) maxDist = d;
+    });
+    const zoneRadius = Math.max(maxDist + 6, 10);
+
+    // ==========================================
+    // MODE 1: ZOOM OUT (< 16) -> MODE RINGKAS
+    // ==========================================
     if (currentZoom < 16) {
+      // Badge ringkasan
       const summaryIcon = L.divIcon({
         className: 'custom-cluster-badge-container',
         html: `<div class="cluster-summary-badge">⚠️ ${pointCount} Titik Mengumpul</div>`,
@@ -681,43 +843,40 @@ async function fetchAndRenderAnomaliCluster() {
 
       const summaryMarker = L.marker([centerLat, centerLng], { icon: summaryIcon });
       summaryMarker.on('click', () => {
-        map.setView([centerLat, centerLng], 17);
+        map.setView([centerLat, centerLng], 17); // Auto Zoom-In saat diklik
       });
 
       anomaliClusterLayerGroup.addLayer(summaryMarker);
 
+      // Titik indikator tunggal di pusat
       const centerPoint = L.circleMarker([centerLat, centerLng], {
-        radius: 4,
+        radius: 5,
         fillColor: "#EF4444",
         color: "#FFFFFF",
-        weight: 1.5,
+        weight: 2,
         fillOpacity: 0.9,
         interactive: false
       });
       anomaliClusterLayerGroup.addLayer(centerPoint);
 
+    // ==========================================
+    // MODE 2: ZOOM IN (>= 16) -> MODE DETAIL
+    // ==========================================
     } else {
-      let maxDist = 0;
-      clusterGroup.forEach(pt => {
-        let [lng, lat] = pt.geom.coordinates;
-        const d = getDistanceInMeters(centerLat, centerLng, lat, lng);
-        if (d > maxDist) maxDist = d;
-      });
-      const zoneRadius = Math.max(maxDist + 5, 8);
-
+      // 1. Gambar Lingkaran Area Merah Penanda Klaster (Cluster Zone)
       const clusterZone = L.circle([centerLat, centerLng], {
         radius: zoneRadius,
         color: "#EF4444",
         fillColor: "#F87171",
-        fillOpacity: 0.18,
+        fillOpacity: 0.2,
         weight: 1.5,
         className: "cluster-zone-bg",
         interactive: false
       });
       anomaliClusterLayerGroup.addLayer(clusterZone);
 
+      // 2. Gambar Badge Header jumlah titik di atas zona
       const offsetY = Math.min(Math.max(zoneRadius * 2.2, 28), 55); 
-
       const zoneHeaderIcon = L.divIcon({
         className: 'custom-cluster-header-container',
         html: `<div class="cluster-zone-header-badge">🔴 ${pointCount} Titik</div>`,
@@ -731,6 +890,7 @@ async function fetchAndRenderAnomaliCluster() {
       });
       anomaliClusterLayerGroup.addLayer(zoneHeaderMarker);
 
+      // 3. Gambar Setiap Titik Bangunan + Border Putih Tegas
       clusterGroup.forEach(item => {
         let [lng, lat] = item.geom.coordinates;
         const slsInfo = slsLookupMap.get(item.kd_sls) || {};
@@ -778,12 +938,13 @@ async function fetchAndRenderAnomaliCluster() {
           </div>
         `;
 
+        // POINT MARKER DENGAN BORDER PUTIH (#FFFFFF) & TEBAL 2
         const pointMarker = L.circleMarker([lat, lng], {
           interactive: true,
-          radius: 6,
+          radius: 6.5,
           fillColor: style.fillColor,
-          color: "#FFFFFF",
-          weight: 1.5,
+          color: "#FFFFFF", // BORDER PUTIH
+          weight: 2,         // TEBAL BORDER PUTIH
           fillOpacity: 0.95
         });
 
@@ -796,14 +957,25 @@ async function fetchAndRenderAnomaliCluster() {
   document.getElementById('metric-anomali').innerText = totalPointsCount.toLocaleString('id-ID');
 }
 
-// RE-RENDER SAAT PERGESERAN ATAU ZOOM PETA BERUBAH
+// 🎯 RE-RENDER SAAT PERGESERAN LAYAR (VIEWPORT) ATAU PERUBAHAN ZOOM DENGAN DEBOUNCE
+let mapMoveTimeout;
 map.on('moveend zoomend', () => {
-  if (document.getElementById('toggle-tagging-db').checked) {
-    renderDbTaggingFromCache();
-  }
-  if (document.getElementById('toggle-anomali-cluster').checked) {
+  clearTimeout(mapMoveTimeout);
+  mapMoveTimeout = setTimeout(() => {
+    const currentFilteredData = getFilteredData();
+    renderDashboard(currentFilteredData);
+
+    if (document.getElementById('toggle-tagging-db').checked && cachedDbPoints.length > 0) {
+      renderDbTaggingFromCache();
+    }
+
+    if (document.getElementById('toggle-google-buildings').checked) {
+      fetchAndRenderGoogleBuildings();
+    }
+    if (document.getElementById('toggle-anomali-cluster').checked) {
     fetchAndRenderAnomaliCluster();
   }
+  }, 200);
 });
 
 // EVENT LISTENERS UNTUK TOGGLE
@@ -811,7 +983,7 @@ document.getElementById('toggle-tagging-db').addEventListener('change', () => fe
 document.getElementById('toggle-google-buildings').addEventListener('change', fetchAndRenderGoogleBuildings);
 document.getElementById('toggle-anomali-cluster').addEventListener('change', fetchAndRenderAnomaliCluster);
 
-// CSV UPLOADER HANDLER (FORCE RE-FETCH SETELAH UPLOAD)
+// CSV UPLOADER HANDLER
 function initCsvUploader() {
   const fileInput = document.getElementById('csv-file-input');
   const statusDiv = document.getElementById('upload-status');
@@ -877,7 +1049,7 @@ function initCsvUploader() {
           return;
         }
 
-        statusDiv.innerText = `✅ Selesai! ${payloadToUpsert.length.toLocaleString()} titik CSV berhasil di-update/disimpan!`;
+        statusDiv.innerText = `✅ Selesai! ${payloadToUpsert.length.toLocaleString('id-ID')} titik CSV berhasil di-update/disimpan!`;
         fileInput.value = '';
 
         await fetchAndRenderDbTagging(true);
@@ -902,7 +1074,7 @@ function getFilteredData() {
   if (kecVal) filtered = filtered.filter(d => d.kd_kec === kecVal);
   if (desaVal) filtered = filtered.filter(d => d.kd_desa === desaVal);
   if (slsVal) filtered = filtered.filter(d => d.kd_sls === slsVal);
-  if (statusVal) filtered = filtered.filter(d => d.status_sls.includes(statusVal));
+  if (statusVal) filtered = filtered.filter(d => d.status_sls && d.status_sls.includes(statusVal));
 
   return filtered;
 }
@@ -932,24 +1104,34 @@ function applyFilters() {
   renderDashboard(filtered);
 }
 
-// RENDER DASHBOARD SIDEBAR & SLS LAYERS
+// 🎯 RENDER DASHBOARD SIDEBAR & SLS LAYERS
 function renderDashboard(data) {
   slsLayerGroup.clearLayers();
   const listContainer = document.getElementById('sls-list');
   listContainer.innerHTML = '';
 
   let totalGap = 0, countKritis = 0;
+  const currentZoom = map.getZoom();
+  const mapBounds = map.getBounds();
 
   data.forEach(item => {
     const csvCount = uploadedTaggingMap.get(item.kd_sls) || 0;
     const totalTagged = (item.total_realisasi_tagging || 0) + csvCount;
-    const gap = (item.total_bangunan_google || 0) - totalTagged;
+    
+    const btt = item.btt_pemetaan || 0;
+    const bttk = item.bttk_pemetaan || 0;
+    const bku = item.bku_pemetaan || 0;
+    const bbttnu = item.bbttnu_pemetaan || 0;
+
+    const targetMuatan = item.total_muatan_pemetaan || (btt + bttk + bku + bbttnu);
+
+    const gap = targetMuatan - totalTagged;
     if (gap > 0) totalGap += gap;
 
     let computedStatus = 'AMAN';
     let color = "#3B82F6";
 
-    if (totalTagged === 0 && item.total_bangunan_google > 10) {
+    if (totalTagged === 0 && targetMuatan > 10) {
       computedStatus = 'KRITIS';
       color = "#EF4444";
       countKritis++;
@@ -963,20 +1145,80 @@ function renderDashboard(data) {
         style: { color: color, weight: 1.5, opacity: 0.9, fillOpacity: 0.3 }
       });
 
-      layer.bindPopup(`
-        <div class="text-gray-900 text-xs font-sans">
-          <strong>${item.nama_sls}</strong><br>
-          ID SLS: <code>${item.kd_sls}</code><br>
-          PCL: <b>${item.nama_pcl || 'Belum Ditunjuk'}</b><br>
-          PML: <b>${item.nama_pml || '-'}</b><br>
-          <hr class="my-1">
-          Fisik Google: <b>${item.total_bangunan_google}</b><br>
-          Tagging DB: <b>${item.total_realisasi_tagging || 0}</b><br>
-          Selisih Gap: <b class="text-red-600">${gap}</b>
-        </div>
-      `);
+      const popupHtml = `
+        <div class="text-gray-900 text-xs font-sans min-w-[220px] p-0.5">
+          <div class="font-bold text-sm text-slate-800 border-b pb-1 mb-1.5 flex justify-between items-center gap-1">
+            <span class="truncate">${item.nama_sls || item.nmsls}</span>
+            <span class="text-[10px] font-mono bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded border border-slate-300 shrink-0">${item.kd_sls}</span>
+          </div>
+          
+          <div class="space-y-0.5 text-[11px] mb-2 text-slate-600">
+            <div>👤 PCL / PPL: <b class="text-slate-800">${item.nama_pcl || 'Belum Ditunjuk'}</b></div>
+            <div>👔 PML: <b class="text-slate-800">${item.nama_pml || '-'}</b></div>
+          </div>
 
+          <div class="bg-slate-50 p-2 rounded-lg border border-slate-200 mb-2">
+            <div class="font-bold text-slate-700 text-[10px] uppercase mb-1 border-b pb-0.5 border-slate-200 flex justify-between">
+              <span>Rincian Muatan Pemetaan</span>
+              <span class="text-emerald-700 font-bold">Total: ${targetMuatan.toLocaleString('id-ID')}</span>
+            </div>
+            <div class="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
+              <div class="flex justify-between"><span class="text-slate-500">BTT:</span> <b>${btt.toLocaleString('id-ID')}</b></div>
+              <div class="flex justify-between"><span class="text-slate-500">BKU:</span> <b>${bku.toLocaleString('id-ID')}</b></div>
+              <div class="flex justify-between"><span class="text-slate-500">BTTK:</span> <b>${bttk.toLocaleString('id-ID')}</b></div>
+              <div class="flex justify-between"><span class="text-slate-500">BBTT-NU:</span> <b>${bbttnu.toLocaleString('id-ID')}</b></div>
+            </div>
+          </div>
+
+          <div class="space-y-1 text-[11px] bg-emerald-50/70 p-2 rounded-lg border border-emerald-200">
+            <div class="flex justify-between items-center">
+              <span class="text-emerald-900 font-medium">📍 Realisasi Tagging:</span>
+              <b class="text-emerald-800 text-xs">${totalTagged.toLocaleString('id-ID')}</b>
+            </div>
+            <div class="flex justify-between items-center border-t border-emerald-200/80 pt-1">
+              <span class="font-bold ${gap > 0 ? 'text-red-700' : 'text-emerald-700'}">🔴 Selisih Gap:</span>
+              <b class="text-xs ${gap > 0 ? 'text-red-700 font-bold' : 'text-emerald-700'}">${gap.toLocaleString('id-ID')}</b>
+            </div>
+          </div>
+        </div>
+      `;
+
+      layer.bindPopup(popupHtml);
       slsLayerGroup.addLayer(layer);
+
+      if (currentZoom >= 15 && currentZoom <= 16) {
+        const bounds = layer.getBounds();
+        
+        if (bounds.isValid()) {
+          const centerLatLng = bounds.getCenter();
+
+          if (mapBounds.contains(centerLatLng)) {
+            const polyLabelHtml = `
+              <div class="sls-center-poly-label">
+                <div class="sls-poly-title">${item.nama_sls || item.nmsls}</div>
+                <div class="sls-poly-details">
+                  <span>BTT:<b>${btt}</b></span> | <span>BKU:<b>${bku}</b></span> | <span>BTTK:<b>${bttk}</b></span> | <span>NU:<b>${bbttnu}</b></span>
+                </div>
+                <div class="sls-poly-tagging">
+                  Tagging: <b>${totalTagged}</b> / <b>${targetMuatan}</b>
+                </div>
+              </div>
+            `;
+
+            const centerMarker = L.marker(centerLatLng, {
+              icon: L.divIcon({
+                className: 'custom-sls-center-label-container',
+                html: polyLabelHtml,
+                iconSize: [160, 42],
+                iconAnchor: [80, 21]
+              }),
+              interactive: false
+            });
+
+            slsLayerGroup.addLayer(centerMarker);
+          }
+        }
+      }
     }
 
     if (computedStatus === 'KRITIS' || computedStatus === 'PERHATIAN') {
@@ -986,11 +1228,11 @@ function renderDashboard(data) {
         " hover:bg-slate-700/80 cursor-pointer text-xs transition shadow-sm";
 
       card.innerHTML = `
-        <div class="font-bold text-slate-100 text-[11px] truncate">${item.nama_sls}</div>
+        <div class="font-bold text-slate-100 text-[11px] truncate">${item.nama_sls || item.nmsls}</div>
         <div class="text-slate-400 text-[10px] mt-0.5">PCL: ${item.nama_pcl || '-'}</div>
         <div class="flex justify-between items-center text-[10px] text-slate-300 mt-1.5 pt-1 border-t border-slate-700/50">
-          <span>Google: <b class="font-mono">${item.total_bangunan_google}</b></span>
-          <span class="text-red-400 font-bold">Gap: ${gap}</span>
+          <span>Muatan: <b class="font-mono">${targetMuatan.toLocaleString('id-ID')}</b></span>
+          <span class="text-red-400 font-bold">Gap: ${gap.toLocaleString('id-ID')}</span>
         </div>
       `;
       

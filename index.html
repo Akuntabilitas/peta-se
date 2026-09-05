@@ -31,7 +31,8 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
-
+  <!-- Library IndexedDB Wrapper super ringan -->
+  <script src="https://cdn.jsdelivr.net/npm/idb-keyval@6/dist/umd-index.min.js"></script>
   <style>
     /* Custom Scrollbar Modern */
     ::-webkit-scrollbar {
@@ -72,7 +73,7 @@
       </div>
       <div>
         <h1 class="text-sm font-bold tracking-wide text-slate-100 flex items-center gap-2">
-          <span>SPATIAL GAP MONITORING</span>
+          <span>HASIL TAGGING SE</span>
           <span class="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded border border-slate-700 font-normal">BOYOLALI</span>
         </h1>
         <p class="text-[10px] text-slate-400">Monitoring Pemetaan & Presisi Tagging Bangunan</p>
@@ -288,6 +289,20 @@
           </svg>
           <span id="map-loader-text" class="text-xs font-semibold tracking-wide">Memuat data spasial...</span>
         </div>
+      </div>
+
+      <!-- PROGRESS BAR CONTAINER UNTUK DOWNLOAD GOOGLE BUILDINGS -->
+      <div id="download-progress-container" class="hidden fixed bottom-6 left-1/2 -translate-x-1/2 z-[2000] bg-slate-900/90 text-white p-3.5 rounded-2xl shadow-2xl border border-slate-700/80 backdrop-blur-md min-w-[320px]">
+        <div class="flex justify-between items-center mb-1.5 text-xs">
+          <span id="download-progress-title" class="font-bold text-amber-400 flex items-center gap-1.5">
+            <span class="animate-spin">⏳</span> Mengunduh Asset Google Buildings...
+          </span>
+          <span id="download-progress-percent" class="font-mono font-bold text-slate-300">0%</span>
+        </div>
+        <div class="w-full bg-slate-700/60 rounded-full h-2.5 overflow-hidden">
+          <div id="download-progress-bar" class="bg-gradient-to-r from-amber-500 to-yellow-400 h-2.5 rounded-full transition-all duration-200" style="width: 0%"></div>
+        </div>
+        <div id="download-progress-subtext" class="text-[10px] text-slate-400 mt-1.5 text-right font-mono">0 / 0 titik</div>
       </div>
 
       <!-- LEGENDA JENIS BANGUNAN -->
