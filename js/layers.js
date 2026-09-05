@@ -468,43 +468,67 @@ export function renderDbTaggingFromCache() {
   document.getElementById('metric-db-tagging').innerText = cachedDbPoints.length.toLocaleString('id-ID');
 }
 
-// --- ANOMALI CLUSTER (OPTIMAL CACHING & FETCHING) ---
+// --- ANOMALI CLUSTER (FIX TIMEOUT & OPTIMAL FETCHING) ---
 export async function fetchAndRenderAnomaliCluster(forceRefetch = false) {
   anomaliClusterLayerGroup.clearLayers();
   const isChecked = document.getElementById('toggle-anomali-cluster')?.checked;
   
   const filtered = getFilteredData();
-  const pmlVal = document.getElementById('filter-pml').value;
-  const pclVal = document.getElementById('filter-pcl').value;
-  const kecVal = document.getElementById('filter-kec').value;
+  const pmlVal = document.getElementById('filter-pml')?.value || '';
+  const pclVal = document.getElementById('filter-pcl')?.value || '';
+  const kecVal = document.getElementById('filter-kec')?.value || '';
 
+  // Jangan load di level Kabupaten/tanpa filter aktif untuk mencegah query membengkak
   if ((!kecVal && !pmlVal && !pclVal) || !isChecked) {
-    document.getElementById('metric-anomali').innerText = "0";
+    const metricEl = document.getElementById('metric-anomali');
+    if (metricEl) metricEl.innerText = "0";
     setCachedAnomaliPoints([]);
     return;
   }
 
   const masterAnomaliKey = `anomali_${kecVal}_${pmlVal}_${pclVal}`;
 
+  // Gunakan cache lokal jika filter belum berubah dan tidak di-force refetch
   if (!forceRefetch && masterAnomaliKey === lastAnomaliFilterKey && cachedAnomaliPoints.length > 0) {
     renderAnomaliClusterFromCache();
     return;
   }
 
-  const activeSlsCodes = filtered.map(d => String(d.kd_sls));
+  // Deduplikasi kode SLS (membuang duplikat)
+  const activeSlsCodes = Array.from(new Set(filtered.map(d => String(d.kd_sls))));
   if (activeSlsCodes.length === 0) return;
 
-  const { data: anomalies, error } = await supabaseClient
-    .from('view_anomali_tagging_mengumpul')
-    .select('*')
-    .in('kd_sls', activeSlsCodes.slice(0, 500));
+  const allAnomalies = [];
+  const CHUNK_SIZE = 40; // Dipecah per 40 SLS agar query PostGIS sangat ringan & bebas timeout
+  const totalBatches = Math.ceil(activeSlsCodes.length / CHUNK_SIZE);
 
-  if (error || !anomalies) return;
+  try {
+    for (let i = 0; i < totalBatches; i++) {
+      const chunkSls = activeSlsCodes.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
 
-  setCachedAnomaliPoints(anomalies);
-  setLastAnomaliFilterKey(masterAnomaliKey);
+      const { data: anomalies, error } = await supabaseClient
+        .from('view_anomali_tagging_mengumpul')
+        .select('kd_sls, no_bang, nama_bang, jenis_bangunan, geom, nmkec, nmdesa, nama_sls, nama_pcl, nama_pml')
+        .in('kd_sls', chunkSls)
+        .limit(2000);
 
-  renderAnomaliClusterFromCache();
+      if (error) {
+        console.warn(`⚠️ Batch anomali ke-${i + 1} dilewati (Timeout/Error):`, error.message);
+        continue; // Lanjutkan batch lain jika 1 batch bermasalah
+      }
+
+      if (anomalies && anomalies.length > 0) {
+        allAnomalies.push(...anomalies);
+      }
+    }
+
+    setCachedAnomaliPoints(allAnomalies);
+    setLastAnomaliFilterKey(masterAnomaliKey);
+    renderAnomaliClusterFromCache();
+
+  } catch (err) {
+    console.error("Terjadi kesalahan tak terduga saat memuat anomali cluster:", err);
+  }
 }
 
 export function renderAnomaliClusterFromCache() {

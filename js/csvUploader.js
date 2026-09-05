@@ -178,16 +178,18 @@ export function initCsvUploader() {
         }
       }
 
-      if (!hasError) {
-        if (statusDiv) {
-          statusDiv.innerText = `✅ Selesai! ${totalRows.toLocaleString('id-ID')} disimpan dari ${files.length} file (${totalSkipped} dilewati, cek F12)`;
-        }
-        fileInput.value = '';
+// ... kode upload CSV ...
 
-        await fetchAndRenderDbTagging(true);
-        await fetchAndRenderAnomaliCluster(true);
-      }
+if (!hasError) {
+  if (statusDiv) {
+    statusDiv.innerText = `✅ Selesai! ${totalRows.toLocaleString('id-ID')} disimpan dari ${files.length} file (${totalSkipped} dilewati, cek F12)`;
+  }
+  fileInput.value = '';
 
+  // Langsung re-render layer spasial tanpa menunggu RPC timeout
+  await fetchAndRenderDbTagging(true);
+  await fetchAndRenderAnomaliCluster(true);
+}
     } catch (err) {
       console.error("Terjadi kesalahan sistem saat unggah CSV:", err);
       if (statusDiv) statusDiv.innerText = "❌ Terjadi kesalahan sistem saat unggah data";
