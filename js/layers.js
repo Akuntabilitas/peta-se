@@ -267,7 +267,7 @@ export async function fetchAndRenderDbTagging(forceRefetch = false) {
   }
 }
 
-// RENDER INSTAN DARI CACHE DENGAN SPATIAL BOUNDING FILTERING
+// RENDER INSTAN DARI CACHE DENGAN EFEK MEMBAL HOVER MURNI CSS (TANPA LOMPAT)
 export function renderDbTaggingFromCache() {
   dbTaggingLayerGroup.clearLayers();
 
@@ -290,21 +290,11 @@ export function renderDbTaggingFromCache() {
 
   let count = 0;
   let renderedLabelsCount = 0;
-  const MAX_PERMANENT_LABELS = 400;
-  const occupiedBoxes = [];
+  const MAX_PERMANENT_LABELS = 500;
 
-  const placementCandidates = [
-    { x: 12, y: 0, dir: 'right' }, { x: -12, y: 0, dir: 'left' }, { x: 0, y: -16, dir: 'top' }, { x: 0, y: 16, dir: 'bottom' },
-    { x: 14, y: -16, dir: 'right' }, { x: -14, y: -16, dir: 'left' }, { x: 14, y: 16, dir: 'right' }, { x: -14, y: 16, dir: 'left' },
-    { x: 28, y: 0, dir: 'right' }, { x: -28, y: 0, dir: 'left' }, { x: 0, y: -28, dir: 'top' }, { x: 0, y: 28, dir: 'bottom' }
-  ];
-
-  function isOverlapping(boxA, boxB) {
-    return !(boxA.right < boxB.left || boxA.left > boxB.right || boxA.bottom < boxB.top || boxA.top > boxB.bottom);
-  }
-
+  // 1. FILTER TITIK TERLIHAT
+  const visiblePoints = [];
   cachedDbPoints.forEach(pt => {
-    // Filter Lokal Jenis Bangunan
     if (selectedJenisSet.size > 0 && !selectedJenisSet.has(Number(pt.jenis_bangunan))) return;
 
     const slsInfo = slsLookupMap.get(String(pt.kd_sls)) || {};
@@ -316,10 +306,31 @@ export function renderDbTaggingFromCache() {
     let lat, lng;
     if (pt.geom && pt.geom.coordinates) [lng, lat] = pt.geom.coordinates;
 
-    if (lat && lng) {
-      if (!mapBounds.contains([lat, lng])) return;
+    if (lat && lng && mapBounds.contains([lat, lng])) {
+      visiblePoints.push({ pt, lat, lng, slsInfo });
+    }
+  });
 
-      count++;
+  count = visiblePoints.length;
+
+  // 2. GRID CLUSTERING UNTUK SPIRAL
+  const clustersMap = new Map();
+  const PRECISION = 0.00015;
+
+  visiblePoints.forEach(item => {
+    const gridKey = `${Math.round(item.lat / PRECISION)}_${Math.round(item.lng / PRECISION)}`;
+    if (!clustersMap.has(gridKey)) {
+      clustersMap.set(gridKey, []);
+    }
+    clustersMap.get(gridKey).push(item);
+  });
+
+  // 3. RENDER MARKER & DETAIL LABELS
+  clustersMap.forEach(group => {
+    const groupSize = group.length;
+
+    group.forEach((item, indexInGroup) => {
+      const { pt, lat, lng, slsInfo } = item;
       const style = getJenisBangunanStyle(pt.jenis_bangunan);
 
       const popupHtml = `
@@ -360,11 +371,8 @@ export function renderDbTaggingFromCache() {
         const noText = pt.no_bang ? `${pt.no_bang}` : '?';
         let bgColor = style.fillColor || style.color || '#10b981';
 
-        if (pt.is_cluster && pt.is_outside_boundary) {
-          bgColor = '#DC2626';
-        } else if (pt.is_cluster || pt.is_outside_boundary) {
-          bgColor = '#D97706';
-        }
+        if (pt.is_cluster && pt.is_outside_boundary) bgColor = '#DC2626';
+        else if (pt.is_cluster || pt.is_outside_boundary) bgColor = '#D97706';
 
         const badgeIcon = L.divIcon({
           className: 'custom-num-badge-container',
@@ -391,10 +399,10 @@ export function renderDbTaggingFromCache() {
 
         const circle = L.circleMarker([lat, lng], {
           interactive: true,
-          radius: 5,
+          radius: 5.5,
           fillColor: circleFill,
           color: circleColor,
-          weight: 1.2,
+          weight: 1.5,
           fillOpacity: 0.95
         });
 
@@ -434,68 +442,60 @@ export function renderDbTaggingFromCache() {
             </div>
           `;
 
-          const pointContainer = map.latLngToContainerPoint([lat, lng]);
-          const approxWidth = Math.min(Math.max((nameText.length + noText.length) * 5, slsNameText.length * 4) + 10, 125);
-          const approxHeight = 22;
+          let offsetX = 14;
+          let offsetY = 0;
+          let tooltipDir = 'right';
 
-          let bestCandidate = null;
+          if (groupSize > 1) {
+            const pointsPerRing = 6;
+            const ringIndex = Math.floor(indexInGroup / pointsPerRing);
+            const positionInRing = indexInGroup % pointsPerRing;
 
-          for (let cand of placementCandidates) {
-            const candBox = {
-              left: pointContainer.x + cand.x - (cand.dir === 'left' ? approxWidth : 0),
-              right: pointContainer.x + cand.x + (cand.dir === 'right' ? approxWidth : approxWidth / 2),
-              top: pointContainer.y + cand.y - (cand.dir === 'top' ? approxHeight : approxHeight / 2),
-              bottom: pointContainer.y + cand.y + (cand.dir === 'bottom' ? approxHeight : approxHeight / 2)
-            };
+            const radius = 40 + (ringIndex * 35); 
+            const angle = (positionInRing * (2 * Math.PI / pointsPerRing)) + (ringIndex * 0.5);
 
-            const hasConflict = occupiedBoxes.some(box => isOverlapping(candBox, box));
+            offsetX = Math.round(Math.cos(angle) * radius);
+            offsetY = Math.round(Math.sin(angle) * radius);
 
-            if (!hasConflict) {
-              bestCandidate = { cand, box: candBox };
-              break;
-            }
+            if (offsetX < -12) tooltipDir = 'left';
+            else if (offsetX > 12) tooltipDir = 'right';
+            else if (offsetY < 0) tooltipDir = 'top';
+            else tooltipDir = 'bottom';
           }
 
-          if (!bestCandidate) {
-            const fallbackIdx = (renderedLabelsCount % 4) + 8;
-            const cand = placementCandidates[fallbackIdx] || placementCandidates[placementCandidates.length - 1];
-            const candBox = {
-              left: pointContainer.x + cand.x,
-              right: pointContainer.x + cand.x + approxWidth,
-              top: pointContainer.y + cand.y,
-              bottom: pointContainer.y + cand.y + approxHeight
-            };
-            bestCandidate = { cand, box: candBox };
-          }
-
-          occupiedBoxes.push(bestCandidate.box);
           renderedLabelsCount++;
-
-          const choice = bestCandidate.cand;
 
           circle.bindTooltip(labelContent, {
             permanent: true,
-            direction: choice.dir,
+            direction: tooltipDir,
             className: 'no-bang-label',
-            offset: [choice.x, choice.y]
+            offset: [offsetX, offsetY]
           });
 
-          const targetLatLng = map.containerPointToLatLng([
-            pointContainer.x + choice.x,
-            pointContainer.y + choice.y
-          ]);
+          // Leader Line
+          if (groupSize > 1) {
+            const ptContainer = map.latLngToContainerPoint([lat, lng]);
+            const targetLatLng = map.containerPointToLatLng([
+              ptContainer.x + offsetX,
+              ptContainer.y + offsetY
+            ]);
 
-          const leaderLine = L.polyline([[lat, lng], targetLatLng], {
-            className: 'leader-line-style',
-            interactive: false
-          });
+            const leaderLine = L.polyline([[lat, lng], targetLatLng], {
+              className: 'leader-line-style',
+              color: circleColor || '#64748b',
+              weight: 1,
+              dashArray: '2, 2',
+              opacity: 0.6,
+              interactive: false
+            });
 
-          dbTaggingLayerGroup.addLayer(leaderLine);
+            dbTaggingLayerGroup.addLayer(leaderLine);
+          }
         }
 
         dbTaggingLayerGroup.addLayer(circle);
       }
-    }
+    });
   });
 
   const statusEl = document.getElementById('upload-status');
